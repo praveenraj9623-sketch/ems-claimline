@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EMS Claim Desk · Voice call</title>
+  <style>
+    body { margin: 0; padding: 32px 20px; background: #eef4f8; color: #10283d;
+           font: 1rem/1.5 system-ui, sans-serif; }
+    main { max-width: 25rem; margin: 8vh auto 0; padding: 24px; background: #fff;
+           border: 1px solid #cad8e2; border-radius: 16px; }
+    h1 { margin: 0; font-size: 1.65rem; }
+    button { width: 100%; min-height: 48px; border: 0; border-radius: 8px;
+             background: #145c8e; color: #fff; font: inherit; font-weight: 600; }
+    button:disabled { opacity: .55; }
+    button:focus-visible { outline: 3px solid #2079af; outline-offset: 3px; }
+    #end { background: #a42739; }
+    #status { min-height: 3em; }
+  </style>
+  <script defer src="/live/livekit.js"></script>
+  <script defer src="/live/client.js"></script>
+</head>
+<body>
+  <main>
+    <h1>EMS Claim Desk</h1>
+    <p>You are the insurance representative for synthetic claim TEST-48213.</p>
+    <p id="status" role="status" aria-live="polite">Join and allow microphone access. The billing agent will speak first.</p>
+    <button id="join" type="button">Join voice call</button>
+    <button id="end" type="button" hidden>End call</button>
+  </main>
+</body>
+</html>

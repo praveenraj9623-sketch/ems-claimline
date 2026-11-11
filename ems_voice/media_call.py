@@ -13,7 +13,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from .phone_records import PhoneCall, PhoneRecords
 from .provider import GroqClient, ServiceError
 from .speech import DeepgramSpeech, SpeechError
-from .workflow import CLAIM, END, MUSIC, READBACK_PREFIX, SLOW_ID, YES, Call, Turn, append_agent, clean, read_back, reply
+from .workflow import CLAIM, END, MUSIC, SLOW_ID, YES, Call, Turn, append_agent, clean, latest_readback, read_back, reply
 
 LOGGER = logging.getLogger(__name__)
 STREAM_SID = re.compile(r"MZ[0-9a-fA-F]{32}\Z")
@@ -79,40 +79,22 @@ class Playback:
         return f"turn-{self.turn}-phrase-{index}"
 
 
-class MediaCall:
-    def __init__(self, socket: WebSocket, sid: str, state: PhoneCall, records: PhoneRecords,
+class VoiceConversation:
+    """Shared conversation, speech recognition, and playback accounting."""
+
+    def __init__(self, sid: str, state: PhoneCall, records: PhoneRecords,
                  speech: DeepgramSpeech, extractor: GroqClient):
-        self.socket, self.sid, self.state, self.records = socket, sid, state, records
+        self.sid, self.state, self.records = sid, state, records
         self.speech, self.extractor = speech, extractor
-        self.stream_sid = ""
         self.buffer = TurnBuffer()
         self.pending: asyncio.Queue[str] = asyncio.Queue()
         self.stop = asyncio.Event()
-        self.terminal = asyncio.Event()
         self.output_lock = asyncio.Lock()
         self.playback: Playback | None = None
         self.play_task: asyncio.Task | None = None
         self.caller_speaking = False
         self.stopping = False
         self.last_audio = 0.0
-
-    async def send(self, event: str, **message) -> None:
-        await asyncio.wait_for(self.socket.send_json({"event": event, "streamSid": self.stream_sid, **message}), 4)
-
-    async def start(self) -> None:
-        async with asyncio.timeout(8):
-            message = await self.socket.receive_json()
-            if message.get("event") == "connected":
-                message = await self.socket.receive_json()
-        start = message.get("start", {})
-        sid = start.get("streamSid", "")
-        if (message.get("event") != "start" or start.get("callSid") != self.sid
-                or not STREAM_SID.fullmatch(sid) or message.get("streamSid") != sid
-                or start.get("mediaFormat") != FORMAT or "inbound" not in start.get("tracks", [])):
-            raise ValueError("Invalid Twilio start frame.")
-        self.stream_sid = sid
-        self.state.stream_started = True
-        self.records.save(self.sid, self.state)
 
     def speak(self, turn: int) -> None:
         text = self.state.call.transcript[turn - 1].text
@@ -125,7 +107,7 @@ class MediaCall:
         async with self.output_lock:
             if self.playback is playback and not self.stopping:
                 playback.audio_sent = True
-                await self.send("media", media={"payload": base64.b64encode(audio).decode("ascii")})
+                await self.send("media", audio=audio)
 
     async def stream_playback(self, playback: Playback, spell: bool) -> None:
         try:
@@ -146,7 +128,7 @@ class MediaCall:
                         if self.playback is not playback or self.stopping:
                             return
                         playback.sent.add(index)
-                        await self.send("mark", mark={"name": playback.mark(index)})
+                        await self.send("mark", name=playback.mark(index))
         except Exception:
             self.state.error = "Agent audio failed or timed out. Check Deepgram synthesis and retry the call."
             self.stop.set()
@@ -185,26 +167,10 @@ class MediaCall:
                 self.state.partial[playback.turn] = " ".join(playback.phrases[:count])
             self.records.save(self.sid, self.state)
 
-    async def receive_media(self, recognizer) -> None:
-        while True:
-            message = await self.socket.receive_json()
-            if message.get("streamSid") != self.stream_sid:
-                continue
-            match message.get("event"):
-                case "media":
-                    media = message.get("media", {})
-                    if media.get("track") == "inbound":
-                        try:
-                            audio = base64.b64decode(media.get("payload", ""), validate=True)
-                        except (ValueError, TypeError, binascii.Error):
-                            continue
-                        if audio:
-                            await asyncio.wait_for(recognizer.audio(audio), 4)
-                            self.last_audio = asyncio.get_running_loop().time()
-                case "mark":
-                    await self.mark(message.get("mark", {}).get("name", ""))
-                case "stop":
-                    return
+    async def forward_audio(self, recognizer, audio: bytes) -> None:
+        if audio:
+            await asyncio.wait_for(recognizer.audio(audio), 4)
+            self.last_audio = asyncio.get_running_loop().time()
 
     def enqueue(self, text: str) -> None:
         if text:
@@ -227,9 +193,7 @@ class MediaCall:
             call.phase = "confirming"
         phase = call.held_phase if call.phase == "hold" else call.phase
         if phase == "confirming" and (YES.fullmatch(text) or END.fullmatch(text)):
-            latest = next((number for number, turn in reversed(list(enumerate(call.transcript, 1)))
-                           if turn.speaker == "agent" and turn.text.startswith(READBACK_PREFIX)), None)
-            if latest not in played:
+            if latest_readback(call) not in played:
                 call.transcript.append(Turn("representative", text))
                 read_back(call)
                 return call
@@ -269,24 +233,23 @@ class MediaCall:
             if asyncio.get_running_loop().time() - self.last_audio >= 3:
                 await asyncio.wait_for(recognizer.control("KeepAlive"), 4)
 
-    async def terminal_grace(self) -> None:
-        await self.terminal.wait()
-        # Status and media are independent transports. Let final marks and stop arrive first.
-        await asyncio.sleep(2)
+    async def wait_for_disconnect(self) -> None:
+        await asyncio.Future()
 
-    async def run(self) -> None:
-        await self.start()
+    async def converse(self) -> None:
+        self.state.stream_started = True
+        self.records.save(self.sid, self.state)
         async with self.speech.listen() as recognizer:
             reader = asyncio.create_task(self.receive_media(recognizer))
             stt = asyncio.create_task(self.transcribe(recognizer))
             worker = asyncio.create_task(self.conversation())
             keepalive = asyncio.create_task(self.keep_alive(recognizer))
-            terminal = asyncio.create_task(self.terminal_grace())
+            disconnect = asyncio.create_task(self.wait_for_disconnect())
             done = asyncio.create_task(self.stop.wait())
             self.last_audio = asyncio.get_running_loop().time()
             self.speak(1)
             try:
-                completed, _ = await asyncio.wait((reader, stt, worker, keepalive, terminal, done),
+                completed, _ = await asyncio.wait((reader, stt, worker, keepalive, disconnect, done),
                                                   return_when=asyncio.FIRST_COMPLETED)
                 for task in completed:
                     await task
@@ -296,10 +259,10 @@ class MediaCall:
                 pass
             finally:
                 self.stopping = True
-                for finishing_task in (reader, keepalive, terminal, done, self.play_task):
+                for finishing_task in (reader, keepalive, disconnect, done, self.play_task):
                     if finishing_task is not None:
                         finishing_task.cancel()
-                await asyncio.gather(reader, keepalive, terminal, done, return_exceptions=True)
+                await asyncio.gather(reader, keepalive, disconnect, done, return_exceptions=True)
                 if self.play_task is not None:
                     await asyncio.gather(self.play_task, return_exceptions=True)
                 try:
@@ -320,3 +283,58 @@ class MediaCall:
                 finally:
                     worker.cancel()
                     await asyncio.gather(worker, return_exceptions=True)
+
+
+class MediaCall(VoiceConversation):
+    def __init__(self, socket: WebSocket, sid: str, state: PhoneCall, records: PhoneRecords,
+                 speech: DeepgramSpeech, extractor: GroqClient):
+        super().__init__(sid, state, records, speech, extractor)
+        self.socket = socket
+        self.stream_sid = ""
+        self.terminal = asyncio.Event()
+
+    async def send(self, event: str, **message) -> None:
+        payload = {"event": event, "streamSid": self.stream_sid}
+        if event == "media":
+            payload["media"] = {"payload": base64.b64encode(message["audio"]).decode("ascii")}
+        elif event == "mark":
+            payload["mark"] = {"name": message["name"]}
+        await asyncio.wait_for(self.socket.send_json(payload), 4)
+
+    async def run(self) -> None:
+        async with asyncio.timeout(8):
+            message = await self.socket.receive_json()
+            if message.get("event") == "connected":
+                message = await self.socket.receive_json()
+        start = message.get("start", {})
+        sid = start.get("streamSid", "")
+        if (message.get("event") != "start" or start.get("callSid") != self.sid
+                or not STREAM_SID.fullmatch(sid) or message.get("streamSid") != sid
+                or start.get("mediaFormat") != FORMAT or "inbound" not in start.get("tracks", [])):
+            raise ValueError("Invalid Twilio start frame.")
+        self.stream_sid = sid
+        await self.converse()
+
+    async def receive_media(self, recognizer) -> None:
+        while True:
+            message = await self.socket.receive_json()
+            if message.get("streamSid") != self.stream_sid:
+                continue
+            match message.get("event"):
+                case "media":
+                    media = message.get("media", {})
+                    if media.get("track") == "inbound":
+                        try:
+                            audio = base64.b64decode(media.get("payload", ""), validate=True)
+                        except (ValueError, TypeError, binascii.Error):
+                            continue
+                        await self.forward_audio(recognizer, audio)
+                case "mark":
+                    await self.mark(message.get("mark", {}).get("name", ""))
+                case "stop":
+                    return
+
+    async def wait_for_disconnect(self) -> None:
+        await self.terminal.wait()
+        # Status and media are independent transports. Let final marks and stop arrive first.
+        await asyncio.sleep(2)

@@ -33,10 +33,10 @@ class LiveTranscription:
 
 
 class DeepgramSpeech:
-    def __init__(self, api_key: str, stt_model: str, voice: str):
+    def __init__(self, api_key: str, stt_model: str, voice: str, *, stt_encoding: str = "mulaw"):
         self.headers = {"Authorization": f"Token {api_key}"}
         self.stt_query = urlencode({
-            "model": stt_model, "language": "en-US", "encoding": "mulaw",
+            "model": stt_model, "language": "en-US", "encoding": stt_encoding,
             "sample_rate": 8000, "channels": 1, "interim_results": "true",
             "smart_format": "true", "endpointing": 500, "utterance_end_ms": 1100,
         })

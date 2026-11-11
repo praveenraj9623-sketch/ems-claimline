@@ -5,6 +5,7 @@ import sqlite3
 import time
 from contextlib import closing
 from dataclasses import dataclass, field
+from http import HTTPStatus
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -160,7 +161,7 @@ class OutboundCalls:
                              (time.time(), "Call attempt released after checking the Twilio Calls Log.", attempt))
 
 
-def twilio_error(error: TwilioRestException) -> str:
+def twilio_error(error: TwilioRestException, settings: DialSettings) -> str:
     guidance = {
         20003: "Check TWILIO_ACCOUNT_SID and the primary TWILIO_AUTH_TOKEN for that account.",
         21210: "Use a voice-capable Twilio number from this account as TWILIO_FROM_NUMBER.",
@@ -170,8 +171,22 @@ def twilio_error(error: TwilioRestException) -> str:
         21219: "Verify your mobile number in Twilio before calling from a trial account.",
         20429: "Twilio is rate-limiting requests. Wait a moment before clicking again.",
     }
-    code = error.code if isinstance(error.code, int) else None
-    detail = guidance.get(code or 0, "Check your Twilio Calls Log and Debugger for details.")
+    code = int(str(error.code)) if re.fullmatch(r"[0-9]{5,6}", str(error.code)) else None
+    detail = guidance.get(code or 0)
+    if detail is None and "trial accounts have limited parameter access" in str(error.msg).casefold():
+        detail = ("This Twilio trial limits outbound calls to Twilio templates and blocks Media Streams. "
+                  "Upgrade the account to use Call my phone with the EMS voice agent.")
+    if detail is None:
+        reason = " ".join(str(error.msg or "").split())
+        for private in (settings.auth_token, settings.account_sid, settings.to_number, settings.from_number):
+            reason = re.sub(re.escape(private), "redacted", reason, flags=re.I)
+        reason = re.sub(r"https?://\S+|[\w-]{20,}|\+?\d[\d(). -]{6,}\d", "redacted", reason, flags=re.I)
+        reason = re.sub(r"[^a-zA-Z0-9 .,:;()'!?+-]", " ", reason).strip()[:220]
+        try:
+            fallback = HTTPStatus(error.status).phrase
+        except ValueError:
+            fallback = "Request rejected"
+        detail = f"{reason or fallback} Check the Twilio Calls Log for details."
     return f"Twilio rejected the dial request (code {code or error.status}). {detail}"
 
 
@@ -208,7 +223,7 @@ def place_call(calls: OutboundCalls, settings: DialSettings, after: str | None) 
         )
     except TwilioRestException as error:
         if 400 <= error.status < 500 and error.status != 408:
-            calls.request_error(attempt, twilio_error(error))
+            calls.request_error(attempt, twilio_error(error, settings))
         else:
             calls.request_error(attempt, UNCONFIRMED, uncertain=True)
     except (RequestException, ValueError):

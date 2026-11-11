@@ -46,7 +46,7 @@ class OutboundDashboardTests(unittest.TestCase):
         (self.root / "app.py").write_bytes(APP.read_bytes())
         self.app = AppTest.from_file(str(self.root / "app.py"), default_timeout=10)
         self.enterContext(patch.dict(os.environ, {
-            "VOICE_PUBLIC_URL": HTTPS, "TWILIO_ACCOUNT_SID": ACCOUNT, "TWILIO_AUTH_TOKEN": TOKEN,
+            "VOICE_TRANSPORT": "twilio", "VOICE_PUBLIC_URL": HTTPS, "TWILIO_ACCOUNT_SID": ACCOUNT, "TWILIO_AUTH_TOKEN": TOKEN,
             "TWILIO_FROM_NUMBER": FROM, "CALL_TO_NUMBER": TO,
         }))
         self.api_requests = []
@@ -70,6 +70,12 @@ class OutboundDashboardTests(unittest.TestCase):
             raise ReadTimeout()
         if self.failure == "unverified":
             return TwilioResponse(400, json.dumps({"code": 21219, "message": "Unverified phone number."}))
+        if self.failure == "blocked":
+            message = f"Outbound dialing blocked for {TO} on account {ACCOUNT} with {TOKEN}."
+            return TwilioResponse(400, json.dumps({"code": 21203, "message": message}))
+        if self.failure == "trial":
+            message = "Invalid or disallowed parameters provided - trial accounts have limited parameter access."
+            return TwilioResponse(400, json.dumps({"message": message}))
         if self.status_during_create:
             self.assertEqual(self.progress("ringing", 1).status_code, 204)
         return TwilioResponse(201, json.dumps({"sid": SID, "status": "queued", "account_sid": ACCOUNT}))
@@ -162,6 +168,9 @@ class OutboundDashboardTests(unittest.TestCase):
         self.assertEqual(self.app.metric[0].value, "Call ended")
         self.assertEqual([json.loads(element.value) for element in self.app.json],
                          [EXPECTED, dict.fromkeys(CHECKS, True)])
+        self.assertEqual([tab.label for tab in self.app.tabs], ["Chat", "Phone Call"])
+        self.assertIn("Phone transcript", [item.label for item in self.app.expander])
+        self.assertIn(PAID, [item.value for item in self.app.text])
         self.assertEqual(len(self.provider.reviews), 1)
         self.assertEqual(len(self.api_requests), 1)
 
@@ -173,6 +182,24 @@ class OutboundDashboardTests(unittest.TestCase):
         self.assertEqual(len(self.api_requests), 1)
         self.assertFalse(self.app.button[0].disabled)
         self.app.run()
+        self.assertEqual(len(self.api_requests), 1)
+
+    def test_unmapped_twilio_rejection_shows_reason_without_private_values(self):
+        self.failure = "blocked"
+        self.click()
+        error = self.app.error[0].value
+        self.assertIn("21203", error)
+        self.assertIn("Outbound dialing blocked", error)
+        for private in (TO, ACCOUNT, TOKEN):
+            self.assertNotIn(private, error)
+
+    def test_trial_rejection_explains_the_media_streams_restriction(self):
+        self.failure = "trial"
+        self.click()
+        error = self.app.error[0].value
+        self.assertIn("400", error)
+        self.assertIn("blocks Media Streams", error)
+        self.assertIn("Upgrade the account", error)
         self.assertEqual(len(self.api_requests), 1)
 
     def test_no_answer_shows_twilio_status_and_allows_another_click(self):
@@ -223,7 +250,13 @@ class OutboundDashboardTests(unittest.TestCase):
         self.app.run()
         self.assertEqual([json.loads(element.value) for element in self.app.json], [EXPECTED])
         self.assertIn("Temporary review failure", self.app.error[0].value)
-        self.assertIn("retry-review", self.app.code[0].value)
+        self.provider.review_failure = False
+        next(button for button in self.app.button if button.label == "Retry review").click().run()
+        self.wait_for("review.json")
+        self.app.run()
+        self.assertEqual([json.loads(element.value) for element in self.app.json],
+                         [EXPECTED, dict.fromkeys(CHECKS, True)])
+        self.assertEqual(len(self.provider.reviews), 2)
 
 
 class ReservationTests(unittest.TestCase):

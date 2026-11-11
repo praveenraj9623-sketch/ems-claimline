@@ -115,6 +115,14 @@ def next_question(call):
     read_back(call)
 
 
+def latest_readback(call: Call) -> int | None:
+    for index in range(len(call.transcript) - 1, -1, -1):
+        turn = call.transcript[index]
+        if turn.speaker == "agent" and turn.text.startswith(READBACK_PREFIX):
+            return index + 1
+    return None
+
+
 def extract(call, text, provider):
     proposed = None
     candidates = {item.key: candidate(item, text, call.focus) for item in FIELDS}

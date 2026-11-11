@@ -278,6 +278,20 @@ class PhoneTests(unittest.TestCase):
                 socket.receive_json()
         self.assertTrue(self.read("review.json")["read_back_done"])
 
+    def test_hangup_during_corrected_readback_does_not_credit_the_earlier_one(self):
+        with self.stream() as socket:
+            self.hear(socket, 4)
+            self.caller(socket, PAID)
+            self.hear(socket, 6)
+            self.caller(socket, "No, the paid amount was $250.25.")
+            self.hear(socket, 6, acknowledge=0)
+            self.frame(socket, "stop")
+        self.assertEqual(self.read("claim_result.json"), {**EXPECTED, "paid_amount": 250.25})
+        self.assertFalse(self.read("review.json")["read_back_done"])
+        reviewed = self.provider.reviews[0]["transcript"]
+        self.assertTrue(any(row["text"].startswith(READBACK_PREFIX) for row in reviewed))
+        self.assertFalse(any("$250.25" in row["text"] for row in reviewed if row["speaker"] == "agent"))
+
     def test_barge_in_cancels_in_flight_synthesis(self):
         self.speech.block_after_audio = "Claim status is paid."
         with self.stream() as socket:

@@ -4,7 +4,7 @@ import json
 import os
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -31,7 +31,7 @@ def local_settings(root):
 
 @dataclass(frozen=True)
 class Config:
-    api_key: str
+    api_key: str = field(repr=False)
     extract_model: str
     review_model: str
 

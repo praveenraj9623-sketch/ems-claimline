@@ -4,3 +4,7 @@ __pycache__/
 *.py[cod]
 .streamlit/secrets.toml
 phone_calls/
+chat_calls/
+browser_calls/
+.livekit/
+node_modules/
