@@ -4,7 +4,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import date
 
-from .fields import FIELDS, UNKNOWN, candidate
+from .fields import FIELDS, SPOKEN_DATE, UNKNOWN, candidate
 from .provider import ServiceError, object_schema
 
 CLAIM = {"claim_number": "TEST-48213", "date_of_service": "03/14/2026", "patient_name": "Alex Morgan"}
@@ -23,7 +23,13 @@ RESUME = re.compile(r"\b(?:i(?:'m| am) back|thanks? for (?:holding|waiting)|back
 SLOW = re.compile(r"\b(?:repeat|spell|say (?:it|that|the claim number) again|"
                   r"(?:say (?:it|that)|claim number) (?:a little |more )?slow(?:ly|er)|"
                   r"one character at a time)\b", re.I)
-YES = re.compile(r"^(?:yes(?:,? (?:that(?:'s| is) correct|correct|it is|all correct))?|correct|confirmed|that(?:'s| is) (?:right|correct)|sounds (?:right|correct))\s*[.!]*$", re.I)
+CONFIRM_READBACK = r"i confirm (?:(?:the|your) )?(?:re\.{2,}\s+)?read[- ]back"
+YES = re.compile(
+    rf"(?:yes|{CONFIRM_READBACK}|yes[,.!]*\s+it is|"
+    rf"(?:(?:yes|{CONFIRM_READBACK})[,.!]*\s+)?"
+    r"(?:correct|confirmed|that(?:'s| is) (?:right|correct)|sounds (?:right|correct)|"
+    r"all correct|everything is correct))\s*[.!]*", re.I
+)
 NO = re.compile(r"^(?:no|incorrect|that(?:'s| is) (?:wrong|incorrect))\s*[.!]*$", re.I)
 END = re.compile(r"^(?:that(?:'s| is) (?:all|everything)(?: i (?:have|can share|can provide))?|i (?:don't|do not) have (?:any )?more (?:information|details)|i have no other (?:information|details)|we can end the call)\s*[.!]*$", re.I)
 IDENTITY = re.compile(r"\b(?:what(?:'s| is) the (?:patient(?:'s)? name|date of service)|who is the patient)\b", re.I)
@@ -36,8 +42,9 @@ Use the shortest complete value, preserving any negation that changes the status
 values from the agent, previous turns, another claim, examples, guesses, questions, or values
 explicitly corrected or withdrawn. For paid_amount select the full amount including currency
 if spoken. For payment_date select the complete date with year. For check_or_eft_number select
-the reference itself, preserving hyphens. Use the preceding agent question to interpret a
-short answer. For a correction, return the final stated value. Unsupported or ambiguous means null.
+the reference itself, preserving hyphens. Year-first numeric dates can appear as "2026 03 20" or
+as "2026 320"; cite their original wording. Use the preceding agent question to interpret a short
+answer. For a correction, return the final stated value. Unsupported or ambiguous means null.
 Only report facts; never give a conversational reply."""
 
 
@@ -143,7 +150,9 @@ def extract(call, text, provider):
         normalized, evidence = value
         if proposed is not None:
             quote = proposed[key]
-            if not quote or quote not in text or evidence not in quote:
+            direct_date = (key == call.focus == "payment_date" and text.strip(" .!?") == evidence
+                           and SPOKEN_DATE.fullmatch(evidence))
+            if not direct_date and (not quote or quote not in text or evidence not in quote):
                 continue
         facts[key] = Fact(normalized, evidence, len(call.transcript) + 1)
     return facts

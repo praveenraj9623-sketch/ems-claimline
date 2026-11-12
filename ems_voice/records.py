@@ -46,7 +46,7 @@ def save_outputs(directory: Path, call: Call, transcript: list[dict], *, call_er
 
 
 def review_saved(directory: Path, provider: GroqClient, *, retry: bool = False,
-                 read_back_finished: bool = True) -> None:
+                 read_back_finished: bool = True, mode: str = "groq") -> None:
     output = directory / "review.json"
     error = directory / "review_error.json"
     if output.exists() or (error.exists() and not retry):
@@ -56,7 +56,7 @@ def review_saved(directory: Path, provider: GroqClient, *, retry: bool = False,
         result = read_output(directory, "claim_result.json")
         if transcript is None or result is None:
             raise ServiceError("The conversation files are unavailable. Check the saved record and retry.")
-        scorecard = review_transcript(transcript, "groq", provider).scorecard
+        scorecard = review_transcript(transcript, mode, provider).scorecard
         if scorecard["all_four_facts_collected"]:
             scorecard["all_four_facts_collected"] = all(result[key] is not None for key in CORE_KEYS)
         if not read_back_finished:

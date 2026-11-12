@@ -8,7 +8,13 @@ from typing import Callable
 
 STATUS = re.compile(r"\b(?:not yet paid|not paid|unpaid|partially paid|paid|denied|rejected|pending|processing|in progress|in process|approved|closed|received|not found)\b", re.I)
 AMOUNT = re.compile(r"(?<![\w.,+\-−])(?:USD\s*)?\$?\s*(?:\d{1,3}(?:,\d{3})+|\d{1,9})(?:\.\d{1,2})?(?:\s*(?:US dollars|dollars|USD))?(?![\w,.]\d|[\w])", re.I)
-DATE = re.compile(r"(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})(?!\d)", re.I)
+SPOKEN_YEAR = r"(?:19|20)[0-9]{2}"
+DATE_GAP = r"(?:[.,]\s*|\s+)"
+SPOKEN_DATE = re.compile(
+    rf"{SPOKEN_YEAR}{DATE_GAP}(?:[0-9]{{1,2}}{DATE_GAP}[0-9]{{1,2}}|[0-9]{{3,4}})(?!\d|{DATE_GAP}\d)"
+)
+DATE = re.compile(rf"(?<!\d)(?:\d{{4}}-\d{{2}}-\d{{2}}|\d{{1,2}}/\d{{1,2}}/\d{{4}}|{SPOKEN_DATE.pattern}|"
+                  r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})(?!\d)", re.I)
 DIGIT_WORDS = dict(zip("zero one two three four five six seven eight nine".split(), "0123456789"))
 DIGIT_WORDS["oh"] = "0"
 DIGIT = r"(?:[0-9]|" + "|".join(DIGIT_WORDS) + r")"
@@ -37,6 +43,20 @@ def normalize_amount(value):
 
 
 def normalize_date(value):
+    if SPOKEN_DATE.fullmatch(value):
+        year, *parts = re.split(DATE_GAP, value)
+        if len(parts) == 2:
+            return datetime(int(year), int(parts[0]), int(parts[1])).date().isoformat()
+        digits = parts[0]
+        dates = set()
+        for split in range(max(1, len(digits) - 2), 3):
+            try:
+                dates.add(datetime(int(year), int(digits[:split]), int(digits[split:])).date().isoformat())
+            except ValueError:
+                continue
+        if len(dates) == 1:
+            return dates.pop()
+        raise ValueError("Invalid or ambiguous spoken date")
     cleaned = re.sub(r"(?<=\d)(st|nd|rd|th)\b|,", "", value, flags=re.I)
     for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d %Y", "%b %d %Y"):
         try:

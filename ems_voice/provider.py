@@ -40,8 +40,10 @@ class Config:
 
     @classmethod
     def load(cls, root):
-        values = local_settings(root)
+        return cls.from_settings(local_settings(root))
 
+    @classmethod
+    def from_settings(cls, values):
         def get(name, default=""):
             return values.get(name, default).strip()
 

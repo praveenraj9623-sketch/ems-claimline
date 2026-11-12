@@ -2,6 +2,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from time import sleep
 
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
@@ -25,11 +26,14 @@ class BrowserVoiceTests(unittest.TestCase):
         self.headers = {"host": "127.0.0.1:5001", "origin": "http://127.0.0.1:8501"}
         self.sequence = 0
 
-    def speak(self, socket, text):
+    def send_audio(self, socket, text):
         self.sequence += 1
         pcm = bytes([self.sequence]) * 640
         self.speech.script[pcm] = [result(text, self.sequence)]
         socket.send_bytes(pcm)
+
+    def speak(self, socket, text):
+        self.send_audio(socket, text)
         update = socket.receive_json()
         self.assertEqual(update["event"], "transcript")
         return update
@@ -61,7 +65,7 @@ class BrowserVoiceTests(unittest.TestCase):
 
             self.speak(socket, PAID)
             self.hear(socket, 6)
-            self.speak(socket, "Yes, that is correct.")
+            self.speak(socket, "Yes. Correct.")
             self.hear(socket, 2)
             self.assertEqual(socket.receive_json()["event"], "finishing")
             output = socket.receive_json()
@@ -92,3 +96,28 @@ class BrowserVoiceTests(unittest.TestCase):
             with self.client.websocket_connect("/voice", headers={**self.headers, "origin": "https://example.org"}):
                 self.fail("Unexpectedly accepted an untrusted origin")
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_payment_date_survives_separate_speech_endpoints(self):
+        for segments in (("2026.", "320."), ("2026.", "03.", "20.")):
+            with self.subTest(segments=segments):
+                self.assert_spoken_date(segments)
+
+    def assert_spoken_date(self, segments):
+        with self.client.websocket_connect("/voice", headers=self.headers) as socket:
+            socket.receive_json()
+            self.hear(socket, 4)
+            self.speak(socket, "The claim was paid for $240. The EFT number is EFT-9134.")
+            self.hear(socket, 1)
+            for segment in segments[:-1]:
+                self.send_audio(socket, segment)
+                sleep(.65)
+            update = self.speak(socket, segments[-1])
+            self.assertEqual(update["turns"][-2]["text"], " ".join(segments).replace(". ", " "))
+            self.assertIn("Payment date is March 20, 2026.", update["turns"][-1]["text"])
+            self.hear(socket, 6)
+            self.speak(socket, "Yes, that is correct.")
+            self.hear(socket, 2)
+            self.assertEqual(socket.receive_json()["event"], "finishing")
+            output = socket.receive_json()
+        self.assertEqual(output["claim"], EXPECTED)
+        self.assertEqual(output["review"], dict.fromkeys(CHECKS, True))

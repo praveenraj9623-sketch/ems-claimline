@@ -5,6 +5,7 @@ function microphoneProcessor() {
       this.packet = new ArrayBuffer(640);
       this.view = new DataView(this.packet);
       this.offset = 0;
+      this.energy = 0;
     }
 
     process(inputs) {
@@ -13,12 +14,15 @@ function microphoneProcessor() {
       for (const sample of channel) {
         const value = Math.max(-1, Math.min(1, sample));
         this.view.setInt16(this.offset, value * (value < 0 ? 32768 : 32767), true);
+        this.energy += value * value;
         this.offset += 2;
         if (this.offset === this.packet.byteLength) {
-          this.port.postMessage(this.packet, [this.packet]);
+          const level = Math.sqrt(this.energy / (this.offset / 2));
+          this.port.postMessage({ frame: this.packet, level }, [this.packet]);
           this.packet = new ArrayBuffer(640);
           this.view = new DataView(this.packet);
           this.offset = 0;
+          this.energy = 0;
         }
       }
       return true;
@@ -123,15 +127,35 @@ function renderResults(container, data) {
 export default function ({ parentElement, data }) {
   const start = parentElement.querySelector("#voice-start");
   const end = parentElement.querySelector("#voice-end");
+  const meter = parentElement.querySelector("#voice-meter");
   const status = parentElement.querySelector("#voice-status");
   const transcript = parentElement.querySelector("#voice-transcript");
   const results = parentElement.querySelector("#voice-results");
   let active = null;
 
+  function updateListening(call, level = 0) {
+    if (call.ending) {
+      meter.hidden = true;
+      meter.classList.remove("is-listening");
+      return;
+    }
+    if (!call.phase) return;
+    const now = performance.now();
+    if (level >= .012) call.lastVoice = now;
+    const listening = now - call.lastVoice < 230;
+    meter.hidden = false;
+    meter.classList.toggle("is-listening", listening);
+    if (listening) meter.style.setProperty("--mic-level", String(Math.min(1, .45 + level * 6)));
+    const label = listening ? "Listening…" :
+      call.phase === "hold" ? "On hold · speak when ready" : "Live · microphone on";
+    if (status.textContent !== label) status.textContent = label;
+  }
+
   function finish(call, message) {
     if (active !== call) return;
     active = null;
     call.ending = true;
+    updateListening(call);
     stopMicrophone(call);
     call.socket?.close();
     status.textContent = message;
@@ -158,10 +182,12 @@ export default function ({ parentElement, data }) {
       case "transcript":
         if (call.ending) return;
         renderTranscript(transcript, message.turns);
-        status.textContent = message.phase === "hold" ? "On hold · speak when ready" : "Live · microphone on";
+        call.phase = message.phase;
+        updateListening(call);
         break;
       case "finishing":
         call.ending = true;
+        updateListening(call);
         stopMicrophone(call);
         end.disabled = true;
         status.textContent = "Call ended · reviewing transcript…";
@@ -179,7 +205,8 @@ export default function ({ parentElement, data }) {
 
   start.onclick = async () => {
     if (active) return;
-    const call = { greetingAt: performance.now() + 2000, clips: new Set(), nextPlayback: 0, ending: false };
+    const call = { greetingAt: performance.now() + 2000, clips: new Set(), nextPlayback: 0,
+      lastVoice: -Infinity, ending: false };
     active = call;
     start.disabled = true;
     end.disabled = true;
@@ -221,9 +248,10 @@ export default function ({ parentElement, data }) {
         const mute = call.context.createGain();
         mute.gain.value = 0;
         call.input = input;
-        input.port.onmessage = ({ data: frame }) => {
+        input.port.onmessage = ({ data: { frame, level } }) => {
           if (!call.ending && call.socket.readyState === WebSocket.OPEN && call.socket.bufferedAmount < 65536) {
             call.socket.send(frame);
+            updateListening(call, level);
           }
         };
         microphone.connect(input).connect(mute).connect(call.context.destination);
@@ -238,6 +266,7 @@ export default function ({ parentElement, data }) {
   end.onclick = () => {
     if (!active || active.ending) return;
     active.ending = true;
+    updateListening(active);
     sendControl(active, { event: "end" });
     stopMicrophone(active);
     end.disabled = true;

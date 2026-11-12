@@ -8,6 +8,17 @@ from .provider import ServiceError, object_schema
 from .workflow import CLAIM, READBACK_PREFIX, SLOW_ID, Call, Fact, spoken_value, withdraw_facts
 
 BILLING_OFFICE = re.compile(r"\bbilling office of [^.!?]{1,80}\bEMS\b", re.I)
+SPOKEN_CLAIM = re.compile(
+    r"\b(?:test|t[.\s,-]+e[.\s,-]+s[.\s,-]+t)[.\s,-]*(?:dash[.\s,-]+)?"
+    r"(?:48213|(?:4|four)[.\s,-]+(?:8|eight)[.\s,-]+(?:2|two)[.\s,-]+"
+    r"(?:1|one)[.\s,-]+(?:3|three))\b", re.I
+)
+HOSTED_QUESTIONS = (
+    ("claim_status", re.compile(r"\b(?:status|paid|denied|pending)\b", re.I)),
+    ("paid_amount", re.compile(r"\b(?:amount|how much)\b", re.I)),
+    ("check_or_eft_number", re.compile(r"\b(?:check|EFT|reference)\b", re.I)),
+    ("payment_date", re.compile(r"\b(?:date|when)\b", re.I)),
+)
 CHECKS = {
     "introduced_as_billing_office": "The agent actually identified itself as calling from the billing office of an EMS agency.",
     "claim_number_stated": "The agent actually said the full target claim number, as written or spelled out.",
@@ -39,9 +50,9 @@ class Review:
     method: str
 
 
-def practice_review(transcript):
-    """Check transcript evidence independently of model judgments."""
-    reconstructed = Call("practice")
+def inspect_transcript(transcript, *, hosted=False):
+    """Reconstruct representative-reported facts and check evidence without model judgments."""
+    reconstructed = Call("practice", transcript=[])
     focus = None
     evidence = {key: [] for key in CHECKS}
     unsupported = []
@@ -58,9 +69,9 @@ def practice_review(transcript):
 
         if BILLING_OFFICE.search(text):
             evidence["introduced_as_billing_office"].append(index)
-        if CLAIM["claim_number"] in text or text == SLOW_ID:
+        if stated_claim_number(text, hosted):
             evidence["claim_number_stated"].append(index)
-        if text.startswith(READBACK_PREFIX):
+        if started_readback(text, hosted):
             if turn.get("playback") != "partial":
                 evidence["read_back_done"].append(index)
             for key in fields:
@@ -70,13 +81,30 @@ def practice_review(transcript):
                         unsupported.append(index)
             focus = None
         else:
-            focus = next((item.key for item in FIELDS if item.question in text), focus)
+            focus = next((item.key for item in FIELDS if item.question.lower() in text.lower()), focus)
+            if hosted and "?" in text:
+                question = text.split("?")[-2].rsplit(".", 1)[-1]
+                focus = next((key for key, pattern in reversed(HOSTED_QUESTIONS) if pattern.search(question)), focus)
     if all(key in reconstructed.facts for key in CORE_KEYS):
         evidence["all_four_facts_collected"] = sorted({reconstructed.facts[key].turn for key in CORE_KEYS})
     evidence["no_invented_data"] = sorted(set(unsupported))
     score = {key: bool(evidence[key]) for key in CHECKS}
     score["no_invented_data"] = not unsupported
-    return Review(score, evidence, "Local practice rubric")
+    return reconstructed, Review(score, evidence, "Local practice rubric")
+
+
+def stated_claim_number(text, hosted):
+    return bool(SPOKEN_CLAIM.search(text)) if hosted else CLAIM["claim_number"] in text or text == SLOW_ID
+
+
+def started_readback(text, hosted):
+    if hosted:
+        return bool(re.search(r"\blet me read back what i captured\b", text, re.I))
+    return text.startswith(READBACK_PREFIX)
+
+
+def practice_review(transcript):
+    return inspect_transcript(transcript)[1]
 
 
 def run_review(call, provider):
@@ -92,7 +120,8 @@ def review_transcript(transcript, mode, provider):
         "fixed_claim": CLAIM, "rubric": CHECKS, "transcript": transcript,
     }, REVIEW_SCHEMA)
     turns = {turn["turn"]: turn for turn in transcript}
-    facts_grounded = practice_review(transcript).scorecard["all_four_facts_collected"]
+    hosted = mode == "huskyvoice"
+    facts_grounded = inspect_transcript(transcript, hosted=hosted)[1].scorecard["all_four_facts_collected"]
     score, evidence = {}, {}
     try:
         if set(answer) != set(CHECKS):
@@ -111,13 +140,13 @@ def review_transcript(transcript, mode, provider):
                 passed = passed and facts_grounded
             elif key == "read_back_done":
                 ids = [turn for turn in ids if turns[turn]["speaker"] == "agent"
-                       and turns[turn]["text"].startswith(READBACK_PREFIX)
+                       and started_readback(turns[turn]["text"], hosted)
                        and turns[turn].get("playback") != "partial"]
             elif key == "introduced_as_billing_office":
                 ids = [turn for turn in ids if turns[turn]["speaker"] == "agent" and BILLING_OFFICE.search(turns[turn]["text"])]
             elif key == "claim_number_stated":
                 ids = [turn for turn in ids if turns[turn]["speaker"] == "agent" and
-                       (CLAIM["claim_number"] in turns[turn]["text"] or turns[turn]["text"] == SLOW_ID)]
+                       stated_claim_number(turns[turn]["text"], hosted)]
             score[key] = passed and bool(ids) if key != "no_invented_data" else passed
             evidence[key] = list(dict.fromkeys(ids))
     except (KeyError, TypeError, ValueError):

@@ -67,12 +67,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(review["no_invented_data"])
 
     def test_correction_gets_a_new_readback(self):
-        call = simulate(PAID, "No.", "Actually, the paid amount was $250.25.")
+        call = simulate(PAID, "No.", "Yes. Correct, but the paid amount was $250.25.")
         self.assertEqual(call.phase, "confirming")
         self.assertEqual(call.result()["paid_amount"], 250.25)
         self.assertIn("$250.25", call.transcript[-1].text)
         reply(call, "Correct.", None)
         self.assertTrue(run_review(call, None).scorecard["no_invented_data"])
+
+    def test_punctuated_and_stuttered_confirmations_end_the_call(self):
+        for confirmation in ("Yes. Correct.", "Everything is correct.",
+                             "I confirm your re... Read back. Everything is correct."):
+            with self.subTest(confirmation=confirmation):
+                call = simulate(PAID, confirmation)
+                self.assertEqual(call.phase, "ended")
+                self.assertEqual(call.result(), EXPECTED)
 
     def test_explicit_withdrawal_clears_earlier_evidence(self):
         call = simulate(PAID, "Actually the EFT number is unavailable.", "Yes.")
@@ -124,6 +132,21 @@ class WorkflowTests(unittest.TestCase):
 
 
 class FieldTests(unittest.TestCase):
+    def test_year_first_speech_dates_require_a_single_valid_calendar_date(self):
+        for text in ("2026 03 20.", "2026 320.", "2026. 03. 20.", "2026 0320."):
+            with self.subTest(text=text):
+                found = candidate(FIELDS[3], text, "payment_date")
+                self.assertEqual(found, ("2026-03-20", text[:-1]))
+        for text in ("2026.", "320.", "2026 112.", "2026 02 30.", "2026 03 20 21."):
+            with self.subTest(text=text):
+                self.assertIsNone(candidate(FIELDS[3], text, "payment_date"))
+
+    def test_direct_spoken_date_does_not_depend_on_model_guessing_the_format(self):
+        call = simulate("The claim was paid for $240. The EFT number is EFT-9134.")
+        call.mode = "groq"
+        reply(call, "2026 320.", Stub(dict.fromkeys(KEYS)))
+        self.assertEqual(call.result(), EXPECTED)
+
     def test_amount_is_not_service_date_billed_amount_or_wrong_currency(self):
         amount = FIELDS[1]
         for text in ("Date of service 03/14/2026.", "It was not paid. The billed amount was $800.",

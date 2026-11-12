@@ -1,4 +1,4 @@
-"""EMS ClaimLine dashboard for text, browser voice, and Twilio calls."""
+"""EMS ClaimLine dashboard for text, browser voice, and phone calls."""
 
 import time
 from dataclasses import dataclass, field
@@ -6,11 +6,17 @@ from pathlib import Path
 from uuid import uuid4
 
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
+from ems_voice.huskyvoice import (
+    END_STATES, FAILED_STATES, UNCONFIRMED, HuskyError, HuskySettings, HuskyVoice, call_failure,
+    parse_transcript,
+)
 from ems_voice.outbound import Attempt, DialSettings, OutboundCalls, place_call
 from ems_voice.phone_records import PhoneRecords
 from ems_voice.provider import Config, GroqClient, ServiceError, local_settings
 from ems_voice.records import read_output, review_saved, save_outputs
+from ems_voice.review import inspect_transcript
 from ems_voice.speech import DEFAULT_TTS_MODEL, SpeechError, browser_audio
 from ems_voice.workflow import CLAIM, Call, reply
 
@@ -39,6 +45,17 @@ FAILURES = {
 }
 
 
+HUSKY_STATUSES = {
+    "pending": "Queued", "queued": "Queued", "scheduled": "Queued", "initiated": "Dialing",
+    "ringing": "Ringing", "in_progress": "Connected", "completed": "Call ended", "failed": "Call failed",
+    "disallowed": "Call blocked",
+    "cancelled": "Canceled", "canceled": "Canceled", "no_answer": "No answer", "busy": "Line busy",
+    "unconfirmed": "Dial request unconfirmed", "request_failed": "Call request failed",
+    "cleared": "Ready",
+}
+POLL_SECONDS = 5
+
+
 @dataclass
 class ChatSession:
     id: str = field(default_factory=lambda: uuid4().hex)
@@ -51,6 +68,33 @@ class ChatSession:
     autoplay: int | None = None
     audio_error: str = ""
     audio_retry: int | None = None
+
+
+@dataclass
+class HuskyAttempt:
+    id: str = field(default_factory=lambda: uuid4().hex)
+    status: str = "unconfirmed"
+    call_id: str = ""
+    error: str = ""
+    poll_error: str = ""
+    provider_error: str = ""
+    transcript_error: str = ""
+    next_poll: float = 0
+    poll_until: float = field(default_factory=lambda: time.monotonic() + 600)
+
+    @property
+    def active(self) -> bool:
+        return self.status not in END_STATES and self.status not in {"request_failed", "cleared"}
+
+
+def dashboard_settings() -> dict[str, str]:
+    local = local_settings(ROOT)
+    try:
+        secrets = {name: value for name, value in st.secrets.items() if isinstance(value, str)}
+    except StreamlitSecretNotFoundError:
+        secrets = {}
+    secrets.update({name: value for name, value in local.items() if value.strip() or name not in secrets})
+    return secrets
 
 
 @st.cache_resource
@@ -83,7 +127,7 @@ def show_results(folder: Path, result: dict, *, mode: str, reviewer: GroqClient 
         review_error = read_output(folder, "review_error.json")
         if reviewer is not None and review is None and review_error is None:
             with st.spinner("Reviewing the conversation…"):
-                review_saved(folder, reviewer)
+                review_saved(folder, reviewer, mode="huskyvoice" if mode == "huskyvoice" else "groq")
             review = read_output(folder, "review.json")
             review_error = read_output(folder, "review_error.json")
         if review is not None:
@@ -95,7 +139,8 @@ def show_results(folder: Path, result: dict, *, mode: str, reviewer: GroqClient 
             if st.button("Retry review", key=f"{mode}_review_{folder.name}"):
                 if reviewer is not None:
                     with st.spinner("Reviewing the conversation…"):
-                        review_saved(folder, reviewer, retry=True)
+                        review_saved(folder, reviewer, retry=True,
+                                     mode="huskyvoice" if mode == "huskyvoice" else "groq")
                 else:
                     try:
                         records = PhoneRecords(folder.parent)
@@ -121,14 +166,13 @@ def synthesize_turn(session: ChatSession, turn: int, settings: dict) -> None:
         session.autoplay = turn
 
 
-def chat_panel(mode: str = "chat") -> None:
+def chat_panel(settings: dict[str, str], mode: str = "chat") -> None:
     session_key = f"ems_{mode}"
     if session_key not in st.session_state:
         st.session_state[session_key] = ChatSession()
     session: ChatSession = st.session_state[session_key]
     voice_mode = mode == "browser"
-    settings = local_settings(ROOT)
-    provider = GroqClient(Config.load(ROOT))
+    provider = GroqClient(Config.from_settings(settings))
     if voice_mode:
         st.caption("Record a reply or type one. The agent responds in text and audio.")
     if voice_mode and len(session.call.transcript) == 1 and not session.audio and not session.audio_error:
@@ -206,17 +250,20 @@ def chat_panel(mode: str = "chat") -> None:
 def show_phone_record(attempt: Attempt, directory: Path) -> None:
     if not attempt.sid:
         return
-    folder = directory / attempt.sid
+    show_voice_record(directory / attempt.sid, attempt.status, mode="phone")
+
+
+def show_voice_record(folder: Path, status: str, *, mode: str, reviewer: GroqClient | None = None) -> None:
     result = read_output(folder, "claim_result.json")
     transcript = read_output(folder, "transcript.json")
     call_error = read_output(folder, "call_error.json")
     if call_error:
         st.error(call_error["error"])
     if transcript is None or result is None:
-        if attempt.status == "completed":
+        if status == "completed":
             st.info("Waiting for the voice service to finish saving the call.")
         return
-    show_results(folder, result, mode="phone")
+    show_results(folder, result, mode=mode, reviewer=reviewer)
     with st.expander("Phone transcript", expanded=True):
         if transcript:
             with st.container(height=320, border=False):
@@ -262,23 +309,160 @@ def twilio_panel() -> None:
         show_phone_record(attempt, directory)
 
 
+def save_husky_transcript(folder: Path, transcript: list[dict]) -> None:
+    call, _ = inspect_transcript(transcript, hosted=True)
+    save_outputs(folder, call, transcript)
+
+
+def poll_husky_call(client: HuskyVoice, attempt: HuskyAttempt, folder: Path) -> None:
+    attempt.next_poll = time.monotonic() + POLL_SECONDS
+    try:
+        data, attempt.provider_error = client.status(attempt.call_id)
+    except HuskyError as error:
+        attempt.poll_error = str(error)
+        attempt.provider_error = error.details
+        if not error.retryable:
+            attempt.poll_until = 0
+        return
+    status = client.status_name(data)
+    if not status:
+        attempt.poll_error = "HuskyVoice returned an unreadable call status. Try refreshing."
+        return
+    if attempt.poll_error and not attempt.poll_until:
+        attempt.poll_until = time.monotonic() + 600
+    attempt.poll_error = ""
+    if status in END_STATES and attempt.active:
+        attempt.poll_until = time.monotonic() + 30  # Allow time for transcript processing.
+    attempt.status = status
+    attempt.error = call_failure(data, status) if status in FAILED_STATES else ""
+    if status not in END_STATES or (folder / "transcript.json").exists():
+        return
+    try:
+        transcript = client.transcript(data)
+    except ValueError as error:
+        attempt.transcript_error = str(error)
+    else:
+        attempt.transcript_error = ""
+        if transcript:
+            save_husky_transcript(folder, transcript)
+        elif status != "completed":
+            attempt.poll_until = 0
+
+
+@st.fragment(run_every=POLL_SECONDS)
+def huskyvoice_panel() -> None:
+    values = dashboard_settings()
+    try:
+        settings = HuskySettings.load(values)
+    except ValueError as error:
+        settings = None
+        st.warning(str(error))
+    attempt: HuskyAttempt | None = st.session_state.get("husky_attempt")
+    folder = ROOT / "huskyvoice_calls" / attempt.id if attempt else None
+    if settings and attempt and attempt.call_id and folder:
+        now = time.monotonic()
+        auto_poll = (attempt.status != "cleared" and attempt.next_poll <= now < attempt.poll_until
+                     and not (folder / "transcript.json").exists())
+        if st.button("Refresh call status", key="husky_refresh") or auto_poll:
+            poll_husky_call(HuskyVoice(settings), attempt, folder)
+
+    with st.container(border=True):
+        st.metric("Call status", HUSKY_STATUSES.get(attempt.status, "Call status pending") if attempt else "Ready")
+        if settings:
+            st.caption(f"HuskyVoice · Mobile ending in {settings.to_number[-4:]}")
+        if st.button("Call my phone", type="primary", width="stretch",
+                     key=f"husky_dial_{attempt.id if attempt else 'first'}",
+                     disabled=settings is None or bool(attempt and attempt.active)) and settings:
+            attempt = HuskyAttempt(error=UNCONFIRMED)
+            st.session_state.husky_attempt = attempt
+            try:
+                with st.spinner("Requesting a call from HuskyVoice…"):
+                    attempt.call_id, attempt.status = HuskyVoice(settings).start(attempt.id)
+            except HuskyError as error:
+                attempt.error = str(error)
+                attempt.provider_error = error.details
+                attempt.status = "unconfirmed" if error.unconfirmed else "request_failed"
+            else:
+                attempt.error = ""
+                attempt.next_poll = time.monotonic() + POLL_SECONDS
+            st.rerun()
+        if attempt and attempt.status == "ringing":
+            st.info("Answer the incoming call on your mobile.")
+
+    if not attempt or folder is None:
+        return
+    if attempt.error:
+        st.error(attempt.error)
+    if attempt.call_id and attempt.status in FAILED_STATES:
+        st.text(f"HuskyVoice call ID: {attempt.call_id}")
+    if attempt.poll_error:
+        st.error(attempt.poll_error)
+    if details := getattr(attempt, "provider_error", ""):
+        operation = "call status" if attempt.call_id else "create call"
+        st.text(f"HuskyVoice {operation} error: {details}", width="stretch")
+    if (folder / "transcript.json").exists():
+        show_voice_record(folder, attempt.status, mode="huskyvoice",
+                          reviewer=GroqClient(Config.from_settings(values)))
+        return
+
+    unknown_end = attempt.active and (
+        not attempt.call_id or bool(attempt.poll_error) or time.monotonic() >= attempt.poll_until
+    )
+    if not (attempt.status in END_STATES or attempt.status == "cleared" or unknown_end):
+        return
+    if unknown_end:
+        st.info("Check All Calls in HuskyVoice before importing or starting another call.")
+        if st.button("I checked that no call is active", key="husky_release"):
+            attempt.status = "cleared"
+            attempt.error = attempt.poll_error = attempt.provider_error = ""
+            st.rerun()
+    failed = attempt.status in FAILED_STATES
+    with st.expander("Import a transcript") if failed else st.container():
+        if failed:
+            st.caption("If you spoke with Sarah, check the attempt in HuskyVoice → All Calls → Insights for a transcript.")
+        else:
+            st.info(attempt.transcript_error or "HuskyVoice has not returned a transcript through the API. "
+                    "It may still be processing or unavailable on your trial. You can import it from All Calls → Insights.")
+        with st.form(f"husky_import_{attempt.id}", clear_on_submit=True):
+            raw = st.text_area("Paste the call transcript", key="husky_transcript",
+                               help="Use transcript JSON or text with Sarah: and Representative: speaker labels.")
+            if st.form_submit_button("Import and review"):
+                try:
+                    transcript = parse_transcript(raw, api_key=values.get("HUSKYVOICE_API_KEY", "").strip(),
+                                                  to_number=values.get("CALL_TO_NUMBER", "").strip())
+                    if not transcript:
+                        raise ValueError("Paste at least one spoken turn from the call.")
+                except ValueError as error:
+                    st.error(str(error))
+                else:
+                    save_husky_transcript(folder, transcript)
+                    if unknown_end:
+                        attempt.status = "cleared"
+                        attempt.error = attempt.poll_error = attempt.provider_error = ""
+                    st.rerun()
+
+
 st.set_page_config(page_title="EMS ClaimLine", page_icon=":material/phone_in_talk:", layout="centered")
 st.title("EMS ClaimLine")
 st.caption(f"Cedar Vale EMS · Synthetic claim {CLAIM['claim_number']} · Service date {CLAIM['date_of_service']}")
+settings = dashboard_settings()
 chat_tab, book_tab = st.tabs(["Chat", "Book a call"])
 with chat_tab:
-    chat_panel()
+    chat_panel(settings)
 with book_tab:
     choice = st.radio("How would you like to speak with the agent?", ("Call my phone", "Talk here"),
                       horizontal=True, key="call_choice")
     if choice == "Call my phone":
         st.caption("Answer the incoming call on your registered mobile number.")
-        twilio_panel()
+        if settings.get("VOICE_TRANSPORT", "").strip().lower() == "twilio":
+            twilio_panel()
+        else:
+            huskyvoice_panel()
     else:
         with st.expander("Voice options"):
             recorded = st.toggle("Use recorded replies", key="recorded_voice")
         if recorded:
-            chat_panel("browser")
+            chat_panel(settings, "browser")
         else:
             from ems_voice.browser_component import live_voice
 

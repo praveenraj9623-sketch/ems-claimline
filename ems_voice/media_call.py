@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from .fields import DATE_GAP, SPOKEN_YEAR
 from .phone_records import PhoneCall, PhoneRecords
 from .provider import GroqClient, ServiceError
 from .speech import DeepgramSpeech, SpeechError
@@ -20,6 +21,11 @@ STREAM_SID = re.compile(r"MZ[0-9a-fA-F]{32}\Z")
 NOISE = re.compile(r"^\W*(?:(?:background )?noise|applause|static|inaudible|unintelligible)\W*$", re.I)
 FORMAT = {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1}
 SPELL_PAUSE = b"\xff" * 2400
+DATE_CONTINUATION_SECONDS = 2.5
+PARTIAL_DATE = re.compile(
+    rf"(?:(?:the )?(?:payment )?date (?:is|was) )?{SPOKEN_YEAR}(?:{DATE_GAP}(?:0?[1-9]|1[0-2]))?", re.I
+)
+DATE_DIGITS = re.compile(rf"(?:[0-9]{{1,4}}|[0-9]{{1,2}}{DATE_GAP}[0-9]{{1,2}})")
 
 
 class TurnBuffer:
@@ -87,6 +93,8 @@ class VoiceConversation:
         self.sid, self.state, self.records = sid, state, records
         self.speech, self.extractor = speech, extractor
         self.buffer = TurnBuffer()
+        self.date_fragment = ""
+        self.date_timer: asyncio.TimerHandle | None = None
         self.pending: asyncio.Queue[str] = asyncio.Queue()
         self.stop = asyncio.Event()
         self.output_lock = asyncio.Lock()
@@ -178,15 +186,44 @@ class VoiceConversation:
             self.records.save(self.sid, self.state)
             self.pending.put_nowait(text)
 
+    def take_date_fragment(self) -> str:
+        if self.date_timer is not None:
+            self.date_timer.cancel()
+            self.date_timer = None
+        text, self.date_fragment = self.date_fragment, ""
+        return text
+
+    def wait_for_date(self) -> None:
+        if self.date_timer is not None:
+            self.date_timer.cancel()
+        self.date_timer = asyncio.get_running_loop().call_later(DATE_CONTINUATION_SECONDS, self.flush_date)
+
+    def flush_date(self) -> None:
+        self.enqueue(self.take_date_fragment())
+
+    def accept_utterance(self, text: str) -> None:
+        pending_date = self.take_date_fragment()
+        digits = text.strip(" .!?")
+        if pending_date:
+            separator = " " if DATE_DIGITS.fullmatch(digits) else ". "
+            text = pending_date.rstrip(" .!?") + separator + text
+        if self.state.call.focus == "payment_date" and PARTIAL_DATE.fullmatch(text.strip(" .!?")):
+            self.date_fragment = text
+            self.wait_for_date()
+        else:
+            self.enqueue(text)
+
     async def transcribe(self, recognizer) -> None:
         async for message in recognizer.events():
             recognized, utterance = self.buffer.event(message)
             if recognized and not self.stopping:
                 self.caller_speaking = True
                 await self.interrupt()
+                if self.date_timer is not None and not utterance:
+                    self.wait_for_date()
             if utterance:
                 self.caller_speaking = False
-                self.enqueue(utterance)
+                self.accept_utterance(utterance)
 
     def advance(self, call: Call, played: set[int], text: str) -> Call:
         if call.phase == "ended":
@@ -281,7 +318,10 @@ class VoiceConversation:
                     if not stt.done():
                         stt.cancel()
                     await asyncio.gather(stt, return_exceptions=True)
-                self.enqueue(self.buffer.take())
+                tail = self.buffer.take()
+                if tail:
+                    self.accept_utterance(tail)
+                self.flush_date()
                 try:
                     await asyncio.wait_for(self.pending.join(), 5)
                 except TimeoutError:

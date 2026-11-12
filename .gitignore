@@ -6,5 +6,12 @@ __pycache__/
 phone_calls/
 chat_calls/
 browser_calls/
+huskyvoice_calls/
 .livekit/
 node_modules/
+
+.env
+.venv/
+node_modules/
+.mypy_cache/
+phone_calls/*.sqlite3

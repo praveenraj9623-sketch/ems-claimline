@@ -26,6 +26,37 @@
   opacity: .45;
   cursor: default;
 }
+#voice-meter:not([hidden]) {
+  display: inline-flex;
+  height: 1.1rem;
+  align-items: center;
+  gap: 2px;
+}
+#voice-meter i {
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--st-primary-color);
+  opacity: .45;
+  transform: scaleY(.18);
+}
+#voice-meter.is-listening i {
+  opacity: 1;
+  animation: claimline-listening .55s ease-in-out infinite alternate;
+}
+#voice-meter i:nth-child(2) { animation-delay: -.24s; }
+#voice-meter i:nth-child(3) { animation-delay: -.4s; }
+#voice-meter i:nth-child(4) { animation-delay: -.13s; }
+@keyframes claimline-listening {
+  from { transform: scaleY(.24); }
+  to { transform: scaleY(var(--mic-level, .7)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #voice-meter.is-listening i {
+    animation: none;
+    transform: scaleY(.65);
+  }
+}
 #voice-transcript {
   max-height: 20rem;
   overflow: auto;
