@@ -1,4 +1,4 @@
-"""Standard-library transport for Groq structured output."""
+"""Standard-library transport for Groq structured output and transcription."""
 
 import json
 import os
@@ -8,9 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 BASE_URL = "https://api.groq.com/openai/v1/"
 USER_AGENT = "EMS-Voice-Assessment/1.0"
+MAX_RECORDING_BYTES = 3_000_000
 
 
 class ServiceError(Exception):
@@ -34,6 +36,7 @@ class Config:
     api_key: str = field(repr=False)
     extract_model: str
     review_model: str
+    stt_model: str = "whisper-large-v3-turbo"
 
     @classmethod
     def load(cls, root):
@@ -43,7 +46,8 @@ class Config:
             return values.get(name, default).strip()
 
         model = get("GROQ_MODEL", "openai/gpt-oss-20b")
-        return cls(get("GROQ_API_KEY"), model, get("GROQ_REVIEW_MODEL", model))
+        return cls(get("GROQ_API_KEY"), model, get("GROQ_REVIEW_MODEL", model),
+                   get("GROQ_STT_MODEL", "whisper-large-v3-turbo"))
 
 
 def object_schema(properties):
@@ -119,3 +123,25 @@ class GroqClient:
             return result
         except (KeyError, IndexError, TypeError, ValueError):
             raise ServiceError("Groq returned an incomplete or malformed structured response. Please retry.") from None
+
+    def transcribe(self, wav: bytes) -> str:
+        if len(wav) < 44 or len(wav) > MAX_RECORDING_BYTES:
+            raise ValueError("Record a short audio reply of up to 3 MB.")
+        if wav[:4] != b"RIFF" or wav[8:12] != b"WAVE":
+            raise ValueError("The microphone recording must be a WAV file.")
+
+        boundary = uuid4().hex
+        parts = []
+        for name, value in (("model", self.config.stt_model), ("response_format", "json"), ("language", "en")):
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+        parts.extend([
+            (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="reply.wav"\r\n'
+             "Content-Type: audio/wav\r\n\r\n").encode(),
+            wav,
+            f"\r\n--{boundary}--\r\n".encode(),
+        ])
+        data = self.post("audio/transcriptions", b"".join(parts), f"multipart/form-data; boundary={boundary}")
+        transcript = data.get("text")
+        if not isinstance(transcript, str) or not transcript.strip():
+            raise ValueError("No speech was recognized. Record again or type a reply.")
+        return transcript.strip()

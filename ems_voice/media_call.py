@@ -1,4 +1,4 @@
-"""A single Twilio media stream, with independent listening and playback."""
+"""Shared live conversation engine and Twilio media transport."""
 
 import asyncio
 import base64
@@ -219,6 +219,8 @@ class VoiceConversation:
                 self.state.pending.pop(0)
                 self.records.save(self.sid, self.state)
                 call = self.state.call
+                if not self.stopping and len(call.transcript) > previous:
+                    await self.publish_transcript()
                 if (not self.stopping and not self.caller_speaking and self.pending.empty()
                         and len(call.transcript) > previous and call.transcript[-1].speaker == "agent"):
                     await self.interrupt()
@@ -236,6 +238,9 @@ class VoiceConversation:
     async def wait_for_disconnect(self) -> None:
         await asyncio.Future()
 
+    async def publish_transcript(self) -> None:
+        """Publish a live transcript when the transport has a display."""
+
     async def converse(self) -> None:
         self.state.stream_started = True
         self.records.save(self.sid, self.state)
@@ -247,8 +252,9 @@ class VoiceConversation:
             disconnect = asyncio.create_task(self.wait_for_disconnect())
             done = asyncio.create_task(self.stop.wait())
             self.last_audio = asyncio.get_running_loop().time()
-            self.speak(1)
             try:
+                await self.publish_transcript()
+                self.speak(1)
                 completed, _ = await asyncio.wait((reader, stt, worker, keepalive, disconnect, done),
                                                   return_when=asyncio.FIRST_COMPLETED)
                 for task in completed:

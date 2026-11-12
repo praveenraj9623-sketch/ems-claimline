@@ -1,22 +1,21 @@
-"""Local chat and phone dashboard for the EMS assessment."""
+"""EMS ClaimLine dashboard for text, browser voice, and Twilio calls."""
 
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
 import streamlit as st
 
 from ems_voice.outbound import Attempt, DialSettings, OutboundCalls, place_call
-from ems_voice.phone_records import BROWSER_CALL_ID, CALL_SID, PhoneRecords
+from ems_voice.phone_records import PhoneRecords
 from ems_voice.provider import Config, GroqClient, ServiceError, local_settings
 from ems_voice.records import read_output, review_saved, save_outputs
+from ems_voice.speech import DEFAULT_TTS_MODEL, SpeechError, browser_audio
 from ems_voice.workflow import CLAIM, Call, reply
 
 ROOT = Path(__file__).resolve().parent
-BROWSER_CALLS = ROOT / "browser_calls"
-VOICE_BACKEND = "http://127.0.0.1:5000"
+GREETING_DELAY_SECONDS = 2.0
 STATUSES = {
     "requesting": "Requesting call",
     "unconfirmed": "Dial request unconfirmed",
@@ -46,6 +45,12 @@ class ChatSession:
     call: Call = field(default_factory=lambda: Call("groq"))
     pending: str = ""
     error: str = ""
+    recording: bytes | None = None
+    speak_reply: bool = False
+    audio: dict[int, bytes] = field(default_factory=dict)
+    autoplay: int | None = None
+    audio_error: str = ""
+    audio_retry: int | None = None
 
 
 @st.cache_resource
@@ -53,7 +58,7 @@ def call_store(directory: Path) -> OutboundCalls:
     return OutboundCalls(directory)
 
 
-def show_thread(turns: list[dict]) -> None:
+def show_thread(turns: list[dict], session: ChatSession | None = None) -> None:
     for turn in turns:
         agent = turn["speaker"] == "agent"
         name = "EMS billing agent" if agent else "Insurance representative"
@@ -61,6 +66,10 @@ def show_thread(turns: list[dict]) -> None:
         with st.chat_message(name, avatar=avatar):
             st.caption(name + (" · Partial playback" if turn.get("playback") == "partial" else ""))
             st.text(turn["text"], width="stretch")
+            if session is not None and turn["turn"] in session.audio:
+                st.audio(session.audio[turn["turn"]], format="audio/mpeg", autoplay=session.autoplay == turn["turn"])
+    if session is not None:
+        session.autoplay = None
 
 
 def show_results(folder: Path, result: dict, *, mode: str, reviewer: GroqClient | None = None) -> None:
@@ -89,7 +98,7 @@ def show_results(folder: Path, result: dict, *, mode: str, reviewer: GroqClient 
                         review_saved(folder, reviewer, retry=True)
                 else:
                     try:
-                        records = PhoneRecords(folder.parent, BROWSER_CALL_ID if mode == "browser" else CALL_SID)
+                        records = PhoneRecords(folder.parent)
                         records.queue_retry(folder.name)
                     except ValueError:
                         pass  # The backend may already have completed the retry.
@@ -98,22 +107,56 @@ def show_results(folder: Path, result: dict, *, mode: str, reviewer: GroqClient 
             st.info("Review in progress.")
 
 
-def chat_panel() -> None:
-    if "ems_chat" not in st.session_state:
-        st.session_state.ems_chat = ChatSession()
-    session: ChatSession = st.session_state.ems_chat
+def synthesize_turn(session: ChatSession, turn: int, settings: dict) -> None:
+    try:
+        key = settings.get("DEEPGRAM_API_KEY", "").strip()
+        if not key:
+            raise SpeechError("Set DEEPGRAM_API_KEY to enable spoken replies. The text reply is available.")
+        model = settings.get("DEEPGRAM_TTS_MODEL", "").strip() or DEFAULT_TTS_MODEL
+        session.audio[turn] = browser_audio(key, model, session.call.transcript[turn - 1].text)
+    except SpeechError as error:
+        session.audio_error, session.audio_retry = str(error), turn
+    else:
+        session.audio_error, session.audio_retry = "", None
+        session.autoplay = turn
+
+
+def chat_panel(mode: str = "chat") -> None:
+    session_key = f"ems_{mode}"
+    if session_key not in st.session_state:
+        st.session_state[session_key] = ChatSession()
+    session: ChatSession = st.session_state[session_key]
+    voice_mode = mode == "browser"
+    settings = local_settings(ROOT)
     provider = GroqClient(Config.load(ROOT))
+    if voice_mode:
+        st.caption("Record a reply or type one. The agent responds in text and audio.")
+    if voice_mode and len(session.call.transcript) == 1 and not session.audio and not session.audio_error:
+        greeting_at = time.monotonic() + GREETING_DELAY_SECONDS
+        with st.spinner("Preparing the greeting…"):
+            synthesize_turn(session, 1, settings)
+            if session.autoplay == 1:
+                remaining = greeting_at - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
     if session.call.phase == "hold":
         st.info("On hold. Send a message when you’re back.")
     with st.container(height=380, border=True, key=f"thread_{session.id}", autoscroll=True):
-        show_thread(session.call.records())
+        show_thread(session.call.records(), session)
+    if session.audio_error:
+        st.warning(session.audio_error)
+        if session.audio_retry is not None and settings.get("DEEPGRAM_API_KEY", "").strip():
+            if st.button("Retry audio", key=f"retry_audio_{session.id}"):
+                with st.spinner("Preparing the audio…"):
+                    synthesize_turn(session, session.audio_retry, settings)
+                st.rerun()
     if session.call.phase == "ended":
         st.success("Conversation complete.")
         folder = ROOT / "chat_calls" / session.id
         save_outputs(folder, session.call, session.call.records())
-        show_results(folder, read_output(folder, "claim_result.json"), mode="chat", reviewer=provider)
-        if st.button("New chat", key="new_chat"):
-            st.session_state.ems_chat = ChatSession()
+        show_results(folder, read_output(folder, "claim_result.json"), mode=mode, reviewer=provider)
+        if st.button("New conversation" if voice_mode else "New chat", key=f"new_{mode}"):
+            st.session_state[session_key] = ChatSession()
             st.rerun()
         return
 
@@ -125,40 +168,56 @@ def chat_panel() -> None:
         if session.pending:
             st.caption("Unsent reply")
             st.text(session.pending, width="stretch")
-            retry = st.button("Retry reply", key="retry_chat_reply", disabled=not provider.enabled)
+        if session.pending or session.recording is not None:
+            retry = st.button("Retry reply", key=f"retry_reply_{session.id}", disabled=not provider.enabled)
 
     prompt = st.chat_input("Reply as the insurance representative", key=f"chat_{session.id}",
-                           max_chars=1600, disabled=not provider.enabled)
-    message = session.pending if retry else prompt
-    if isinstance(message, str) and message.strip():
-        try:
-            with st.spinner("Preparing the agent’s reply…"):
-                reply(session.call, message, provider)
-        except ServiceError as error:
-            session.error, session.pending = str(error), message
-        else:
-            session.error = session.pending = ""
-        st.rerun()
+                           max_chars=1600, accept_audio=True, max_upload_size=3, disabled=not provider.enabled)
+    if prompt is None and not retry:
+        return
+    if prompt is not None:
+        session.pending = prompt.text.strip()
+        session.recording = prompt.audio.getvalue() if prompt.audio is not None else None
+        session.speak_reply = voice_mode or session.recording is not None
+
+    previous_count = len(session.call.transcript)
+    try:
+        if session.recording is not None:
+            with st.spinner("Transcribing your recording…"):
+                transcript = provider.transcribe(session.recording)
+            session.pending = " ".join(filter(None, (session.pending, transcript)))
+            session.recording = None
+        with st.spinner("Preparing the agent’s reply…"):
+            reply(session.call, session.pending, provider)
+    except ValueError as error:
+        session.error, session.pending, session.recording = str(error), "", None
+    except ServiceError as error:
+        session.error = str(error)
+    else:
+        session.error = session.pending = ""
+        session.audio_error, session.audio_retry = "", None
+        turn = len(session.call.transcript)
+        if session.speak_reply and turn > previous_count and session.call.transcript[-1].speaker == "agent":
+            with st.spinner("Preparing the spoken reply…"):
+                synthesize_turn(session, turn, settings)
+    st.rerun()
 
 
 def show_phone_record(attempt: Attempt, directory: Path) -> None:
     if not attempt.sid:
         return
-    show_voice_record(directory / attempt.sid, attempt.status, mode="phone")
-
-
-def show_voice_record(folder: Path, status: str, *, mode: str) -> None:
+    folder = directory / attempt.sid
     result = read_output(folder, "claim_result.json")
     transcript = read_output(folder, "transcript.json")
     call_error = read_output(folder, "call_error.json")
     if call_error:
         st.error(call_error["error"])
     if transcript is None or result is None:
-        if status == "completed":
+        if attempt.status == "completed":
             st.info("Waiting for the voice service to finish saving the call.")
         return
-    show_results(folder, result, mode=mode)
-    with st.expander("Phone transcript" if mode == "phone" else "Voice transcript", expanded=True):
+    show_results(folder, result, mode="phone")
+    with st.expander("Phone transcript", expanded=True):
         if transcript:
             with st.container(height=320, border=False):
                 show_thread(transcript)
@@ -203,69 +262,24 @@ def twilio_panel() -> None:
         show_phone_record(attempt, directory)
 
 
-def dashboard_request(method: str, sid: str) -> dict:
-    from ems_voice.live_voice import KEY_FILE
-
-    try:
-        secret = (ROOT / KEY_FILE).read_text(encoding="ascii")
-        with httpx.Client(timeout=2, trust_env=False) as client:
-            response = client.request(method, f"{VOICE_BACKEND}/live/dashboard/{sid}",
-                                      headers={"x-ems-dashboard": secret})
-            response.raise_for_status()
-            return response.json()
-    except FileNotFoundError as exc:
-        raise ValueError("Start the LiveKit voice service with Start-LiveKit.ps1.") from exc
-    except httpx.HTTPStatusError as exc:
-        raise ValueError("The voice link is no longer available. Create a new link.") from exc
-    except (OSError, ValueError, httpx.HTTPError) as exc:
-        raise ValueError("The local voice service is unavailable. Check its terminal and restart it.") from exc
-
-
-@st.fragment(run_every="2s")
-def browser_voice_panel() -> None:
-    sid, link = st.session_state.get("voice_invite", ("", ""))
-    status, message = "ready", ""
-    if sid:
-        try:
-            state = dashboard_request("GET", sid)
-            status, message = state["status"], state["message"]
-        except ValueError as error:
-            status, message = "expired", str(error)
-
-    labels = {"ready": "Ready", "waiting": "Waiting for you to join", "connecting": "Connecting",
-              "connected": "Connected", "completed": "Call ended", "failed": "Call failed",
-              "expired": "Link unavailable"}
-    with st.container(border=True):
-        st.metric("Call status", labels[status])
-        st.caption("Join on your phone from the same Wi-Fi as this PC.")
-        if st.button("Create voice link", type="primary", width="stretch", key="create_voice_link",
-                     disabled=status in {"connecting", "connected"}):
-            try:
-                sid = sid if status == "waiting" else uuid4().hex
-                created = dashboard_request("PUT", sid)
-                st.session_state.voice_invite = sid, created["link"]
-            except ValueError as error:
-                st.error(str(error))
-            else:
-                st.rerun()
-        if status == "waiting":
-            st.link_button("Open voice link", link, width="stretch")
-            st.code(link, language=None)
-            st.caption("Copy the link to your phone. It expires in 10 minutes and works once.")
-        if message:
-            st.error(message)
-    if sid and status in {"completed", "failed", "expired"}:
-        show_voice_record(BROWSER_CALLS / sid, status, mode="browser")
-
-
-st.set_page_config(page_title="EMS Claim Desk", page_icon=":material/phone_in_talk:", layout="centered")
-st.title("EMS Claim Desk")
+st.set_page_config(page_title="EMS ClaimLine", page_icon=":material/phone_in_talk:", layout="centered")
+st.title("EMS ClaimLine")
 st.caption(f"Cedar Vale EMS · Synthetic claim {CLAIM['claim_number']} · Service date {CLAIM['date_of_service']}")
-chat_tab, phone_tab = st.tabs(["Chat", "Phone Call"])
+chat_tab, book_tab = st.tabs(["Chat", "Book a call"])
 with chat_tab:
     chat_panel()
-with phone_tab:
-    if local_settings(ROOT).get("VOICE_TRANSPORT", "").lower() == "twilio":
+with book_tab:
+    choice = st.radio("How would you like to speak with the agent?", ("Call my phone", "Talk here"),
+                      horizontal=True, key="call_choice")
+    if choice == "Call my phone":
+        st.caption("Answer the incoming call on your registered mobile number.")
         twilio_panel()
     else:
-        browser_voice_panel()
+        with st.expander("Voice options"):
+            recorded = st.toggle("Use recorded replies", key="recorded_voice")
+        if recorded:
+            chat_panel("browser")
+        else:
+            from ems_voice.browser_component import live_voice
+
+            live_voice(key="live_voice", data={"socketUrl": "ws://127.0.0.1:5001/voice"})

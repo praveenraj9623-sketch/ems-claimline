@@ -19,7 +19,7 @@ from .media_call import MediaCall
 from .outbound import ACCOUNT_SID, OUTBOUND_PATH, TERMINAL_STATUSES, TWILIO_STATUSES, OutboundCalls
 from .phone_records import CALL_SID, PhoneCall, PhoneRecords
 from .provider import Config, GroqClient, local_settings
-from .speech import DeepgramSpeech
+from .speech import DEFAULT_TTS_MODEL, DeepgramSpeech
 from .workflow import Call
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -241,7 +241,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     speech = DeepgramSpeech(deepgram_key, settings.get("DEEPGRAM_STT_MODEL", "nova-3"),
-                            settings.get("DEEPGRAM_TTS_MODEL", "aura-2-thalia-en"))
+                            settings.get("DEEPGRAM_TTS_MODEL", "").strip() or DEFAULT_TTS_MODEL)
     account_sid = settings.get("TWILIO_ACCOUNT_SID", "").strip()
     outbound = OutboundCalls(records.root) if ACCOUNT_SID.fullmatch(account_sid) else None
     app = create_app(public_url, auth_token, records, speech, GroqClient(config, timeout=4), GroqClient(config),

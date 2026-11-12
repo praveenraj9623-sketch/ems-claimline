@@ -12,7 +12,6 @@ from .records import review_saved, save_outputs, write_json
 from .workflow import Call, Fact, Turn, latest_readback
 
 CALL_SID = re.compile(r"CA[0-9a-fA-F]{32}\Z")
-BROWSER_CALL_ID = re.compile(r"[0-9a-f]{32}\Z")
 LOGGER = logging.getLogger(__name__)
 
 

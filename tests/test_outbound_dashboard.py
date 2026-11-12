@@ -168,7 +168,7 @@ class OutboundDashboardTests(unittest.TestCase):
         self.assertEqual(self.app.metric[0].value, "Call ended")
         self.assertEqual([json.loads(element.value) for element in self.app.json],
                          [EXPECTED, dict.fromkeys(CHECKS, True)])
-        self.assertEqual([tab.label for tab in self.app.tabs], ["Chat", "Phone Call"])
+        self.assertEqual([tab.label for tab in self.app.tabs], ["Chat", "Book a call"])
         self.assertIn("Phone transcript", [item.label for item in self.app.expander])
         self.assertIn(PAID, [item.value for item in self.app.text])
         self.assertEqual(len(self.provider.reviews), 1)

@@ -1,12 +1,47 @@
 import json
 import unittest
+import wave
 from contextlib import asynccontextmanager
+from io import BytesIO
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from ems_voice.speech import DeepgramSpeech
+from ems_voice.provider import Config, GroqClient
+from ems_voice.speech import DeepgramSpeech, browser_audio
+
+
+class BrowserSpeechTests(unittest.TestCase):
+    def test_transcription_uses_groq_whisper_multipart(self):
+        recording = BytesIO()
+        with wave.open(recording, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b"\x00\x01" * 160)
+        client = GroqClient(Config("test-key", "extract", "review"))
+        with patch.object(client, "post", return_value={"text": " Please hold. "}) as post:
+            self.assertEqual(client.transcribe(recording.getvalue()), "Please hold.")
+            with self.assertRaises(ValueError):
+                client.transcribe(b"not a WAV")
+        post.assert_called_once()
+        endpoint, body, content_type = post.call_args.args
+        self.assertEqual(endpoint, "audio/transcriptions")
+        self.assertIn(b"whisper-large-v3-turbo", body)
+        self.assertIn(recording.getvalue(), body)
+        self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
+
+    def test_browser_uses_mp3_without_changing_phone_audio_format(self):
+        def speak(request):
+            self.assertEqual(request.url.path, "/v1/speak")
+            self.assertEqual(dict(request.url.params), {"model": "test-voice", "encoding": "mp3"})
+            self.assertEqual(json.loads(request.content), {"text": "Please hold."})
+            return httpx.Response(200, headers={"Content-Type": "audio/mpeg"}, content=b"ID3 test")
+
+        with httpx.Client(transport=httpx.MockTransport(speak)) as client:
+            with patch("ems_voice.speech.httpx.stream", side_effect=client.stream):
+                self.assertEqual(browser_audio("test-key", "test-voice", "Please hold."), b"ID3 test")
 
 
 class SpeechTransportTests(unittest.IsolatedAsyncioTestCase):

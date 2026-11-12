@@ -1,6 +1,10 @@
-# EMS Claim Desk
+# EMS ClaimLine
 
-Open Streamlit on your PC and choose **Chat** or **Phone Call**. In Chat, type your replies as the insurance representative. In Phone Call, click **Call my phone** and answer the incoming Twilio call on your mobile. Both tabs use the Cedar Vale EMS billing caller and fictional claim **TEST-48213**, Alex Morgan, with a service date of **03/14/2026**.
+EMS ClaimLine follows up on ambulance insurance claims. The agent plays the Cedar Vale EMS billing caller, and you play the insurance representative for fictional claim **TEST-48213**, Alex Morgan, with a service date of **03/14/2026**.
+
+- **Chat** accepts typed or recorded replies. A recorded reply produces both text and audio.
+- **Book a call → Talk here** starts a live browser call. Click **Start voice call** and allow microphone access. The opening plays automatically. Speak naturally and pause for the response. Say “Please hold,” stay silent, and speak again when you are ready. Use **End call** to stop the microphone and see the saved results.
+- **Book a call → Call my phone** places an immediate Twilio call to the mobile number configured in `CALL_TO_NUMBER`. Answer it in your phone's dialer.
 
 ## Windows setup
 
@@ -19,7 +23,7 @@ if (-not (Test-Path -LiteralPath .\.env)) { Copy-Item -LiteralPath .\.env.exampl
 notepad .\.env
 ~~~
 
-Set the values you need in your local `.env`. Chat requires only `GROQ_API_KEY`. Phone Call requires all the settings in the table. Environment variables with the same names take precedence.
+Set the values you need in your local `.env`. Text chat and microphone transcription use `GROQ_API_KEY`. Browser audio replies also use `DEEPGRAM_API_KEY`. **Call my phone** uses all the settings in the table. Environment variables with the same names take precedence.
 
 | Setting | Where to get it |
 |---|---|
@@ -27,15 +31,25 @@ Set the values you need in your local `.env`. Chat requires only `GROQ_API_KEY`.
 | `TWILIO_AUTH_TOKEN` | Primary Auth Token for that account. [Twilio Auth Token guide](https://help.twilio.com/articles/223136027-Auth-Tokens-and-How-to-Change-Them) |
 | `TWILIO_FROM_NUMBER` | Your voice-capable Twilio number in international format, including + and country code |
 | `CALL_TO_NUMBER` | Your mobile number in the same format |
-| `DEEPGRAM_API_KEY` | Live speech recognition and synthesis key. [Deepgram Console](https://console.deepgram.com/) |
-| `GROQ_API_KEY` | Structured extraction and reviewer key. [Groq API Keys](https://console.groq.com/keys) |
+| `DEEPGRAM_API_KEY` | Telephone speech recognition and audio synthesis for phone and browser. [Deepgram Console](https://console.deepgram.com/) |
+| `GROQ_API_KEY` | Browser microphone transcription, structured extraction, and review. [Groq API Keys](https://console.groq.com/keys) |
 | `VOICE_PUBLIC_URL` | The HTTPS **Forwarding** origin printed by ngrok, with no path |
 
-Optional model overrides are `DEEPGRAM_STT_MODEL` (default `nova-3`), `DEEPGRAM_TTS_MODEL` (default `aura-2-thalia-en`), `GROQ_MODEL` (default `openai/gpt-oss-20b`), and `GROQ_REVIEW_MODEL` (defaults to `GROQ_MODEL`). The template keeps `GROQ_STT_MODEL` for legacy transcription clients. The phone tab uses Deepgram for transcription.
+Optional model overrides are `GROQ_STT_MODEL` for browser recordings (default `whisper-large-v3-turbo`), `DEEPGRAM_STT_MODEL` for telephone audio (default `nova-3`), `DEEPGRAM_TTS_MODEL` (default `aura-2-thalia-en`), `GROQ_MODEL` (default `openai/gpt-oss-20b`), and `GROQ_REVIEW_MODEL` (defaults to `GROQ_MODEL`).
 
-Use an upgraded Twilio account for **Phone Call**. Twilio's current Voice trial limits outbound API calls to its templates and blocks Media Streams, which the EMS voice agent uses. If Twilio reports a blocked destination country after the upgrade, check Voice Geographic Permissions. [Twilio Voice trial limits](https://www.twilio.com/docs/usage/trials/try-out-voice) · [Voice Geographic Permissions](https://help.twilio.com/articles/41016476253467)
+Use an upgraded Twilio account for **Call my phone**. Twilio's current Voice trial limits outbound API calls to its templates and blocks Media Streams, which the EMS voice agent uses. If Twilio reports a blocked destination country after the upgrade, check Voice Geographic Permissions. [Twilio Voice trial limits](https://www.twilio.com/docs/usage/trials/try-out-voice) · [Voice Geographic Permissions](https://help.twilio.com/articles/41016476253467)
 
-For Chat, run only the Streamlit command under Terminal 3. For Phone Call, run all three terminals.
+For **Chat**, run the Streamlit command under Terminal 3. For live browser voice, also run the local voice service below. For **Call my phone**, run Terminals 1–3.
+
+### Live browser voice
+
+From the same project folder, open a separate PowerShell terminal and run:
+
+~~~powershell
+.\.venv\Scripts\python.exe -m ems_voice.browser_voice
+~~~
+
+Leave it running on port 5001. Open [Streamlit on this PC](http://127.0.0.1:8501) in Chrome or Edge. Use the existing `GROQ_API_KEY` and `DEEPGRAM_API_KEY` in `.env`. The browser voice service runs on localhost and uses a direct audio connection to the Streamlit page. For recorded turns, expand **Voice options** and enable **Use recorded replies**.
 
 ### Terminal 1 · ngrok
 
@@ -58,7 +72,7 @@ Start FastAPI from the project folder. If a previous version is running on port 
 
 ### Terminal 3 · Streamlit
 
-Start the dashboard from the project folder. Open [http://127.0.0.1:8501](http://127.0.0.1:8501), then choose **Chat** or open **Phone Call** and click **Call my phone**.
+Start the dashboard from the project folder. Open [http://127.0.0.1:8501](http://127.0.0.1:8501), then choose **Chat** or **Book a call**.
 
 ~~~powershell
 .\.venv\Scripts\python.exe -m streamlit run app.py --server.address=127.0.0.1 --server.port=8501
@@ -75,13 +89,13 @@ The dashboard supplies both URLs automatically in each Twilio Calls API request.
 | Answer URL | `https://YOUR-NGROK-HOST/voice/outbound/<attempt-id>/answer` | POST |
 | Status callback | `https://YOUR-NGROK-HOST/voice/outbound/<attempt-id>/status` | POST |
 
-## Verify Chat and Phone Call
+## Verify chat and voice
 
-In **Chat**, type “Please hold,” ask for the claim number slowly, then provide the facts from the rehearsal script. Reply “Yes” after the read-back. The claim result and review appear below the thread. Use **New chat** to start another conversation.
+In **Talk here**, start the live call and say “Please hold.” Wait a few seconds, ask for the claim number slowly, then provide the claim status, paid amount, check or EFT reference, and payment date. Say “Yes” after the read-back. The claim result and review appear below the transcript. You can run the same script by typing in **Chat**.
 
-In **Phone Call**, follow the [one-minute mobile script](INTERVIEW.md#one-minute-mobile-test). A live pass requires the button to ring your mobile, audible agent speech, a spoken reply, completed read-back, and both JSON outputs in Streamlit. The dashboard refreshes as Twilio statuses and results arrive. The phone transcript appears with the two results after the call.
+In **Book a call → Call my phone**, click the call button and answer on your mobile. A live pass requires the button to ring your mobile, audible agent speech, a spoken reply, completed read-back, and both JSON outputs in Streamlit. The dashboard refreshes as Twilio statuses and results arrive. The phone transcript appears with the two results after the call.
 
-The app saves chat records under `chat_calls/<conversation-id>/` and phone records under `phone_calls/<CallSid>/`. Git ignores both folders.
+The app saves chat and recorded turns under `chat_calls/<conversation-id>/`, live browser calls under `browser_calls/<conversation-id>/`, and phone records under `phone_calls/<CallSid>/`. Git ignores all three folders. The live browser reviewer uses the transcript and playback confirmations.
 
 | File | Contents |
 |---|---|
@@ -106,7 +120,7 @@ If the dial request times out without confirmation, check the **Twilio Calls Log
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ~~~
 
-The tests exercise the Streamlit chat thread and click the outbound call button, then test the Twilio SDK request, signed webhooks, and audio session with simulated providers. They cover the exact JSON keys, duplicate clicks and callbacks, hold, spell-back, corrections, missing facts, early hang-up, and review retry. The [five-minute field change](INTERVIEW.md#add-payment_method-in-five-minutes) adds `payment_method` while preserving the four-key claim export.
+The tests exercise Streamlit chat and browser voice replies, the outbound call button, signed webhooks, and the phone audio session with simulated providers. They cover the exact JSON keys, duplicate clicks and callbacks, hold, spell-back, corrections, missing facts, early hang-up, and review retry.
 
 ## How the phone service works
 
@@ -114,5 +128,6 @@ The dashboard and voice backend share a private SQLite file for outbound attempt
 
 FastAPI validates Twilio HTTP and WebSocket signatures against the public origin. Deepgram Nova-3 receives Twilio’s inbound 8 kHz mu-law audio. Deepgram Aura streams speech audio back through the same call. Recognized speech interrupts queued agent audio. The service retires outstanding playback marks before sending `clear` so discarded audio cannot credit a read-back. [Deepgram live audio](https://developers.deepgram.com/reference/speech-to-text/listen-streaming) · [Twilio media, marks, and clear](https://www.twilio.com/docs/voice/media-streams/websocket-messages)
 
-Both tabs use the same workflow, validators, and Groq reviewer. Payment values require literal evidence from the representative. Chat reviews the displayed thread. Phone Call reviews the recognized transcript and confirmed playback, including on early hang-up. The final read-back must finish playing to earn credit. WebSocket closure and the terminal callback share the phone finalization path.
-# ems-voice-assistant-assessment
+Both tabs use the same workflow, validators, and Groq reviewer. Payment values require literal evidence from the representative. Chat and Talk here review the displayed thread. The Twilio mode reviews the recognized transcript and confirmed playback, including on early hang-up. The final phone read-back must finish playing to earn credit. WebSocket closure and the terminal callback share the phone finalization path.
+
+The callback setup in this README is for local use. Keep the Streamlit dashboard on the local machine. A public callback deployment needs authenticated call controls and per-user call records.

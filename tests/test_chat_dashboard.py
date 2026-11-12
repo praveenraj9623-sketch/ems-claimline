@@ -2,13 +2,17 @@ import json
 import os
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from ems_voice.provider import ServiceError
 from ems_voice.review import CHECKS
+from ems_voice.speech import SpeechError
 from ems_voice.workflow import HOLD_REPLY, OPENING, SLOW_ID
 from test_assessment import EXPECTED, PAID
 from test_phone import GroqStub
@@ -27,6 +31,7 @@ class ChatDashboardTests(unittest.TestCase):
         self.fail_reply = False
         self.enterContext(patch.dict(os.environ, {
             "GROQ_API_KEY": "offline-chat-key", "GROQ_MODEL": "extract", "GROQ_REVIEW_MODEL": "review",
+            "DEEPGRAM_API_KEY": "",
             "TWILIO_ACCOUNT_SID": "", "TWILIO_FROM_NUMBER": "", "CALL_TO_NUMBER": "",
         }))
         self.enterContext(patch("ems_voice.provider.GroqClient.structured", side_effect=self.structured))
@@ -49,8 +54,12 @@ class ChatDashboardTests(unittest.TestCase):
         folder, = (self.root / "chat_calls").iterdir()
         return folder
 
+    def recorded_voice(self):
+        self.app.radio[0].set_value("Talk here").run()
+        self.app.toggle[0].set_value(True).run()
+
     def test_chat_hold_spell_back_correction_and_review_are_saved_once(self):
-        self.assertEqual([tab.label for tab in self.app.tabs], ["Chat", "Phone Call"])
+        self.assertEqual([tab.label for tab in self.app.tabs], ["Chat", "Book a call"])
         self.assertEqual([item.value for item in self.app.text], [OPENING])
         self.send("Please hold.")
         self.send("Please hold.")
@@ -108,3 +117,70 @@ class ChatDashboardTests(unittest.TestCase):
         separate = AppTest.from_file(str(self.root / "app.py"), default_timeout=8).run()
         self.assertEqual([item.value for item in separate.text], [OPENING])
         self.assertEqual(len(self.provider.extractions), 1)
+
+    def test_talk_here_autoplays_the_greeting_once_per_conversation(self):
+        with (patch.dict(os.environ, {"DEEPGRAM_API_KEY": "local-test"}),
+              patch("ems_voice.speech.browser_audio", return_value=b"ID3 greeting") as speak):
+            self.recorded_voice()
+            self.assertFalse(self.app.exception)
+            self.assertNotIn("Play greeting", [button.label for button in self.app.button])
+            greeting, = self.app.get("audio")
+            self.assertTrue(greeting.proto.autoplay)
+
+            self.app.run()
+            self.app.radio[0].set_value("Call my phone").run()
+            self.recorded_voice()
+            greeting, = self.app.get("audio")
+            self.assertFalse(greeting.proto.autoplay)
+        speak.assert_called_once()
+        self.assertEqual(speak.call_args.args[2], OPENING)
+
+    def test_talk_here_accepts_a_recording_and_renders_text_and_audio(self):
+        self.recorded_voice()
+        self.assertNotIn("Call my phone", [button.label for button in self.app.button])
+        self.assertFalse(self.app.metric)
+        self.assertEqual(len(self.app.chat_input), 2)
+        native_chat_input = st.chat_input
+        audio = b"recorded reply"
+        delivered = False
+
+        def submit_recording(*args, **kwargs):
+            nonlocal delivered
+            result = native_chat_input(*args, **kwargs)
+            self.assertTrue(kwargs["accept_audio"])
+            browser = self.app.session_state["ems_browser"]
+            if not delivered and kwargs["key"] == f"chat_{browser.id}":
+                delivered = True
+                return SimpleNamespace(text="", audio=BytesIO(audio))
+            return result
+
+        with (patch.dict(os.environ, {"DEEPGRAM_API_KEY": "local-test"}),
+              patch("streamlit.chat_input", side_effect=submit_recording),
+              patch("ems_voice.provider.GroqClient.transcribe", return_value=PAID) as transcribe,
+              patch("ems_voice.speech.browser_audio", return_value=b"ID3 test reply") as speak):
+            self.app.run()
+            self.assertEqual(len(self.app.get("audio")), 1)
+            self.app.chat_input[1].set_value("Yes.").run()
+        self.assertFalse(self.app.exception)
+        transcribe.assert_called_once_with(audio)
+        self.assertEqual(speak.call_count, 2)
+        self.assertEqual([item.value for item in self.app.text].count(PAID), 1)
+        self.assertEqual(len(self.app.get("audio")), 2)
+        self.assertEqual([json.loads(item.value) for item in self.app.json],
+                         [EXPECTED, dict.fromkeys(CHECKS, True)])
+        self.assertFalse(self.app.session_state["ems_chat"].call.facts)
+
+    def test_audio_failure_can_retry_without_submitting_another_turn(self):
+        self.recorded_voice()
+        with (patch.dict(os.environ, {"DEEPGRAM_API_KEY": "local-test"}),
+              patch("ems_voice.speech.browser_audio",
+                    side_effect=[SpeechError("Audio temporarily unavailable."), b"ID3 test reply"]) as speak):
+            self.app.chat_input[1].set_value(PAID).run()
+            self.assertFalse(self.app.exception)
+            self.assertIn("Audio temporarily unavailable.", [warning.value for warning in self.app.warning])
+            self.assertEqual(len(self.app.get("audio")), 0)
+            self.button("Retry audio").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertEqual(speak.call_count, 2)
+        self.assertEqual(len(self.provider.extractions), 1)
+        self.assertEqual(len(self.app.get("audio")), 1)
