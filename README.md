@@ -91,7 +91,7 @@ really happened.
 
 ## Tests
 
-`python -m unittest discover -s tests` (92 tests: parsing, agent, reviewer, Twilio signing, simulated phone and browser calls,
+`python -m unittest discover -s tests` (95 tests: parsing, agent, reviewer, Twilio signing, simulated phone and browser calls,
 playback acknowledgements, and the Streamlit app run against a stand-in for `st`).
 
 ## Notes

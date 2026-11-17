@@ -93,6 +93,15 @@ class AppSmokeTest(unittest.TestCase):
     def page(self, st):
         return " ".join(st.markdown_calls)
 
+    def test_runtime_uses_the_running_streamlit_port(self):
+        st = make_streamlit("Voice")
+        st.get_option.return_value = 8502
+        with patch.dict(sys.modules, {"streamlit": st}), \
+                patch("claimline.launch.start_background", return_value=(self.service, "")), \
+                patch("claimline.config.Settings.load", return_value=self.settings) as load:
+            runpy.run_path(str(ROOT / "app.py"), run_name="__main__")
+        load.assert_called_once_with(ui_port=8502)
+
     def test_phone_mode_without_twilio_settings(self):
         st = make_streamlit("Phone call")
         self.assertEqual(self.run_app(st), "ok")

@@ -7,6 +7,16 @@ from claimline.twilio_api import compute_signature, valid_signature
 
 
 class Config(unittest.TestCase):
+    def test_runtime_port_and_explicit_origin_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = Settings.load(root, env={}, ui_port=8502)
+            self.assertEqual(settings.ui_origins, ("http://127.0.0.1:8502", "http://localhost:8502"))
+            settings = Settings.load(root, env={"STREAMLIT_PORT": "8600"}, ui_port=8502)
+            self.assertEqual(settings.ui_origins, ("http://127.0.0.1:8600", "http://localhost:8600"))
+            settings = Settings.load(root, env={"UI_ORIGINS": "https://example.com/"}, ui_port=8502)
+            self.assertEqual(settings.ui_origins, ("https://example.com",))
+
     def test_reads_existing_env_names_and_bom(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / ".env").write_bytes(("\ufeffGROQ_API_KEY=abc\nVOICE_PUBLIC_URL=https://x.ngrok.app/\n"

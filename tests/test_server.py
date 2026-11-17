@@ -94,6 +94,25 @@ class ServerCase(unittest.TestCase):
 
 
 class ChatApi(ServerCase):
+    def test_voice_preflight_allows_actual_ui_port_and_rejects_other_origins(self):
+        self.service.settings = replace(self.settings, ui_origins=Settings._origins("", "8502"))
+        for origin in ("http://127.0.0.1:8502", "http://localhost:8502"):
+            request = urllib.request.Request(self.base + "/api/web/start", method="OPTIONS", headers={
+                "Origin": origin, "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type"})
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.status, 204)
+                self.assertEqual(response.headers["Access-Control-Allow-Origin"], origin)
+            status, state = self.api("/api/web/start", {"mode": "voice"}, headers={"Origin": origin})
+            self.assertEqual(status, 200)
+            self.assertEqual(state["kind"], "voice")
+        for origin in ("http://127.0.0.1:8503", "https://example.com"):
+            request = urllib.request.Request(self.base + "/api/web/start", method="OPTIONS", headers={"Origin": origin})
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request)
+            self.assertEqual(caught.exception.code, 403)
+            self.assertIsNone(caught.exception.headers.get("Access-Control-Allow-Origin"))
+
     def test_browser_voice_requires_playback_acknowledgement(self):
         _, state = self.api("/api/web/start", {"mode": "voice"})
         call_id = state["id"]

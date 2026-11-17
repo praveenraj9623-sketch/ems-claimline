@@ -50,7 +50,7 @@ class Settings:
     ui_origins: tuple = ("http://127.0.0.1:8501", "http://localhost:8501")
 
     @classmethod
-    def load(cls, root: Path = ROOT, env: dict | None = None) -> "Settings":
+    def load(cls, root: Path = ROOT, env: dict | None = None, *, ui_port: int = 8501) -> "Settings":
         values = read_env_file(root / ".env")
         values.update(os.environ if env is None else env)
 
@@ -78,7 +78,7 @@ class Settings:
             validate_twilio_signatures=get("VALIDATE_TWILIO_SIGNATURES", "true").lower() != "false",
             twilio_trial_mode=get("TWILIO_TRIAL_MODE", "false").lower() == "true",
             twilio_trial_webhook_token=get("TWILIO_TRIAL_WEBHOOK_TOKEN"),
-            ui_origins=cls._origins(get("UI_ORIGINS"), get("STREAMLIT_PORT", "8501")),
+            ui_origins=cls._origins(get("UI_ORIGINS"), get("STREAMLIT_PORT", str(ui_port))),
         )
 
     @staticmethod

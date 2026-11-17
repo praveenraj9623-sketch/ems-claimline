@@ -22,7 +22,7 @@ st.markdown(ui.style_tag(), unsafe_allow_html=True)
 
 @st.cache_resource(show_spinner=False)
 def runtime():
-    settings = Settings.load()
+    settings = Settings.load(ui_port=st.get_option("server.port"))
     service, problem = start_background(settings)
     return settings, service, problem
 
