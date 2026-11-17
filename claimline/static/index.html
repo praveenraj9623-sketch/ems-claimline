@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EMS ClaimLine</title>
+<style>
+  :root {
+    --bg: #f4f7fb; --card: #ffffff; --ink: #17283e; --muted: #5d6b7e; --line: #dbe3ee;
+    --blue: #1765a1; --green: #1e8e5a; --amber: #c27a0e; --violet: #6b4fbb; --red: #c0392b; --gray: #8a97a8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1722; --card: #17212f; --ink: #e8eef6; --muted: #9aa8bb; --line: #2a374a; --blue: #5ab0f0; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { margin: 0; font-size: 28px; }
+  .sub { color: var(--muted); margin: 4px 0 20px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tab { border: 1px solid var(--line); background: var(--card); color: var(--ink); padding: 10px 16px; border-radius: 999px; cursor: pointer; font: inherit; }
+  .tab[aria-selected="true"] { background: var(--blue); color: #fff; border-color: var(--blue); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; margin-bottom: 16px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  button.primary { background: var(--blue); color: #fff; border: 0; padding: 12px 22px; border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.danger { background: var(--red); color: #fff; border: 0; padding: 12px 22px; border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px; font: inherit; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .hint { color: var(--muted); font-size: 14px; margin: 8px 0 0; }
+  .notice { border-left: 4px solid var(--amber); background: rgba(194,122,14,.1); padding: 10px 14px; border-radius: 6px; margin: 12px 0 0; font-size: 14px; }
+  .error { border-left-color: var(--red); background: rgba(192,57,43,.1); }
+  .status { font-weight: 600; }
+  .stage { display: flex; align-items: center; gap: 16px; }
+  .bars { display: flex; align-items: center; gap: 5px; height: 56px; width: 120px; }
+  .bars i { display: block; width: 8px; height: 8px; border-radius: 4px; background: var(--gray); transition: background .2s; }
+  .stage[data-state="listening"] .bars i { background: var(--blue); }
+  .stage[data-state="hearing"] .bars i { background: var(--green); }
+  .stage[data-state="thinking"] .bars i { background: var(--amber); }
+  .stage[data-state="speaking"] .bars i { background: var(--violet); }
+  .stage[data-state="hold"] .bars i { background: var(--gray); }
+  .label { font-weight: 600; }
+  #thread { height: 320px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--bg); }
+  .msg { max-width: 82%; margin: 0 0 10px; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; }
+  .msg small { display: block; color: var(--muted); font-size: 12px; }
+  .msg.agent { background: rgba(23,101,161,.12); border-bottom-left-radius: 3px; }
+  .msg.representative { background: rgba(30,142,90,.14); margin-left: auto; border-bottom-right-radius: 3px; }
+  .empty { color: var(--muted); text-align: center; margin-top: 120px; }
+  textarea { width: 100%; font: inherit; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); resize: vertical; }
+  pre { margin: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+  h2 { font-size: 17px; margin: 0 0 10px; }
+  .checks { list-style: none; margin: 10px 0 0; padding: 0; }
+  .checks li { padding: 3px 0; }
+  .ok { color: var(--green); font-weight: 700; } .bad { color: var(--red); font-weight: 700; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>EMS ClaimLine</h1>
+  <p class="sub">Cedar Vale EMS billing office · claim <b>TEST-48213</b> · patient Alex Morgan · date of service 03/14/2026.
+     You play the insurance representative.</p>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" data-tab="phone" aria-selected="true">Call my phone</button>
+    <button class="tab" role="tab" data-tab="voice" aria-selected="false">Talk here (microphone)</button>
+    <button class="tab" role="tab" data-tab="chat" aria-selected="false">Type</button>
+  </div>
+
+  <section class="card" id="panel-phone">
+    <div class="row">
+      <button class="primary" id="dial">Call my phone</button>
+      <span class="status" id="phone-status">Ready</span>
+    </div>
+    <p class="hint" id="phone-hint">The agent calls your registered mobile. Answer it and speak naturally as the insurance representative.</p>
+    <div class="notice error" id="phone-error" hidden></div>
+    <div class="notice" id="phone-setup" hidden></div>
+  </section>
+
+  <section class="card" id="panel-voice" hidden>
+    <div class="row">
+      <button class="primary" id="voice-start">Start voice call</button>
+      <button class="danger" id="voice-end" hidden>End call</button>
+    </div>
+    <div class="stage" id="stage" data-state="idle" style="margin-top:14px">
+      <div class="bars" id="bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div><div class="label" id="stage-label">Not connected</div><div class="hint" id="stage-hint" style="margin:0">Use Chrome or Edge and allow the microphone.</div></div>
+    </div>
+    <div class="notice error" id="voice-error" hidden></div>
+  </section>
+
+  <section class="card" id="panel-chat" hidden>
+    <div class="row"><button class="primary" id="chat-start">Start chat</button><button class="danger" id="chat-end" hidden>End call</button></div>
+    <div id="chat-box" hidden style="margin-top:12px">
+      <textarea id="chat-text" rows="2" placeholder="Reply as the insurance representative… (Enter to send)"></textarea>
+      <div class="row" style="margin-top:8px"><button class="primary" id="chat-send">Send</button><button class="ghost" id="chat-silence">Stay silent</button></div>
+    </div>
+    <div class="notice error" id="chat-error" hidden></div>
+  </section>
+
+  <section class="card">
+    <h2>Conversation</h2>
+    <div id="thread"><div class="empty">The conversation appears here.</div></div>
+  </section>
+
+  <section class="grid" id="results" hidden>
+    <div class="card"><h2>Claim result</h2><pre id="result-json"></pre></div>
+    <div class="card"><h2>AI reviewer scorecard</h2><pre id="score-json"></pre><ul class="checks" id="score-list"></ul><p class="hint" id="score-method"></p></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const CHECKS = ["introduced_as_billing_office", "claim_number_stated", "all_four_facts_collected", "read_back_done", "no_invented_data"];
+let current = { id: null, mode: null };
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined
+    ? { method: "GET" }
+    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Request failed (" + res.status + ")");
+  return data;
+}
+function show(el, text) { el.textContent = text; el.hidden = !text; }
+
+/* ---------- transcript and results ---------- */
+function renderThread(turns) {
+  const box = $("#thread");
+  const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  box.replaceChildren();
+  if (!turns.length) { const d = document.createElement("div"); d.className = "empty"; d.textContent = "The conversation appears here."; box.append(d); return; }
+  for (const t of turns) {
+    const m = document.createElement("div"); m.className = "msg " + t.speaker;
+    const who = document.createElement("small"); who.textContent = t.speaker === "agent" ? "EMS billing agent" : "You (representative)";
+    const body = document.createElement("span"); body.textContent = t.text;
+    m.append(who, body); box.append(m);
+  }
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+function renderResults(state) {
+  if (!state.finished || !state.scorecard) return;
+  $("#results").hidden = false;
+  $("#result-json").textContent = JSON.stringify(state.result, null, 2);
+  $("#score-json").textContent = JSON.stringify(state.scorecard, null, 2);
+  const list = $("#score-list"); list.replaceChildren();
+  for (const k of CHECKS) {
+    const li = document.createElement("li"); const ok = state.scorecard[k];
+    const mark = document.createElement("span"); mark.className = ok ? "ok" : "bad"; mark.textContent = ok ? "✓ " : "✗ ";
+    li.append(mark, document.createTextNode(k.replaceAll("_", " "))); list.append(li);
+  }
+  $("#score-method").textContent = state.review_method ? "Reviewed by: " + state.review_method : "";
+}
+function resetView() { renderThread([]); $("#results").hidden = true; }
+
+/* ---------- tabs ---------- */
+document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t === tab)));
+  for (const name of ["phone", "voice", "chat"]) $("#panel-" + name).hidden = name !== tab.dataset.tab;
+}));
+
+/* ---------- phone ---------- */
+const PHONE_STATUS = { queued: "Requesting the call…", initiated: "Dialing…", ringing: "Ringing — pick up your phone!",
+  "in-progress": "Connected — talk to the agent", completed: "Call ended", busy: "Line busy", failed: "Call failed",
+  "no-answer": "No answer", canceled: "Canceled" };
+let phoneTimer = null;
+async function loadConfig() {
+  try {
+    const cfg = await api("/api/config");
+    $("#phone-hint").textContent = cfg.to_hint ? "The agent will call your mobile " + cfg.to_hint + ". Answer it and speak as the insurance representative."
+                                                : $("#phone-hint").textContent;
+    if (cfg.phone_missing.length) { show($("#phone-setup"), "Phone calling needs these values in .env: " + cfg.phone_missing.join(", ")); $("#dial").disabled = true; }
+    else if (!cfg.public_url) show($("#phone-setup"), "No public URL yet. Run “ngrok http 8000” in another window (or set PUBLIC_BASE_URL in .env), then click Call.");
+  } catch (e) { /* the page still works for the other modes */ }
+}
+$("#dial").addEventListener("click", async () => {
+  show($("#phone-error"), ""); resetView(); $("#dial").disabled = true;
+  try {
+    const res = await api("/api/phone/call", {});
+    current = { id: res.id, mode: "phone" }; $("#phone-status").textContent = PHONE_STATUS.queued;
+    clearInterval(phoneTimer); phoneTimer = setInterval(pollPhone, 1500);
+  } catch (e) { show($("#phone-error"), e.message); $("#dial").disabled = false; }
+});
+async function pollPhone() {
+  try {
+    const s = await api("/api/calls/" + current.id);
+    $("#phone-status").textContent = PHONE_STATUS[s.status] || s.status;
+    renderThread(s.transcript);
+    if (s.error) show($("#phone-error"), s.error);
+    if (s.finished) { clearInterval(phoneTimer); $("#dial").disabled = false; renderResults(s); }
+  } catch (e) { show($("#phone-error"), e.message); clearInterval(phoneTimer); $("#dial").disabled = false; }
+}
+
+/* ---------- chat ---------- */
+async function chatStart() {
+  show($("#chat-error"), ""); resetView();
+  try {
+    const s = await api("/api/web/start", { mode: "chat" });
+    current = { id: s.id, mode: "chat" }; renderThread(s.transcript);
+    $("#chat-start").hidden = true; $("#chat-end").hidden = false; $("#chat-box").hidden = false; $("#chat-text").focus();
+  } catch (e) { show($("#chat-error"), e.message); }
+}
+async function chatSend(silent) {
+  const text = $("#chat-text").value.trim();
+  if (!silent && !text) return;
+  try {
+    const s = silent ? await api("/api/web/" + current.id + "/silence", {}) : await api("/api/web/" + current.id + "/say", { text });
+    $("#chat-text").value = ""; renderThread(s.transcript);
+    if (s.reply.end) await chatEnd();
+  } catch (e) { show($("#chat-error"), e.message); }
+}
+async function chatEnd() {
+  try { const s = await api("/api/web/" + current.id + "/end", {}); renderThread(s.transcript); renderResults(s); }
+  catch (e) { show($("#chat-error"), e.message); }
+  $("#chat-start").hidden = false; $("#chat-end").hidden = true; $("#chat-box").hidden = true;
+}
+$("#chat-start").addEventListener("click", chatStart);
+$("#chat-send").addEventListener("click", () => chatSend(false));
+$("#chat-silence").addEventListener("click", () => chatSend(true));
+$("#chat-end").addEventListener("click", chatEnd);
+$("#chat-text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); chatSend(false); } });
+
+/* ---------- live voice (browser microphone) ---------- */
+const voice = { active: false, listening: false, speaking: false, rec: null, buffer: "", interim: "", timer: null, idle: null,
+                expect: "text", phase: "active", stream: null, ctx: null, analyser: null, level: 0, state: "idle", raf: 0, tick: 0 };
+const PAUSE_MS = { text: 1700, number: 2700, date: 3800, confirm: 1500 };
+const bars = [...document.querySelectorAll("#bars i")];
+const LABELS = {
+  idle: ["Not connected", ""], listening: ["Listening…", "Speak when you are ready."],
+  hearing: ["Hearing you…", "Pause for a moment when you are done."], thinking: ["Thinking…", ""],
+  speaking: ["Agent is speaking…", "Please wait for the agent to finish."], hold: ["On hold", "Take your time. Speak again when you are back."],
+};
+function setState(state) {
+  voice.state = state; $("#stage").dataset.state = state;
+  const [label, hint] = LABELS[state]; $("#stage-label").textContent = label; $("#stage-hint").textContent = hint;
+}
+function animate() {
+  voice.tick += 1;
+  if (voice.analyser) {
+    const data = new Uint8Array(voice.analyser.fftSize); voice.analyser.getByteTimeDomainData(data);
+    let sum = 0; for (const v of data) sum += ((v - 128) / 128) ** 2;
+    voice.level = voice.level * 0.7 + Math.sqrt(sum / data.length) * 0.3;
+  }
+  const mic = voice.state === "listening" || voice.state === "hearing";
+  if (mic && voice.state === "listening" && voice.level > 0.05) setState("hearing");
+  bars.forEach((bar, i) => {
+    let h = 8;
+    if (mic) h = 8 + Math.min(1, voice.level * 9) * 48 * (0.45 + 0.55 * Math.abs(Math.sin(voice.tick / 4 + i * 0.9)));
+    else if (voice.state === "speaking") h = 14 + 30 * Math.abs(Math.sin(voice.tick / 6 + i * 0.7));
+    else if (voice.state === "thinking") h = 10 + 10 * Math.abs(Math.sin(voice.tick / 10 + i * 0.4));
+    else if (voice.state === "hold") h = 8 + 4 * Math.abs(Math.sin(voice.tick / 30 + i * 0.3));
+    bar.style.height = h.toFixed(1) + "px";
+  });
+  voice.raf = requestAnimationFrame(animate);
+}
+function pickVoice() {
+  const voices = speechSynthesis.getVoices().filter((v) => v.lang.startsWith("en"));
+  return voices.find((v) => /Google US English|Jenny|Aria|Samantha|Zira/i.test(v.name)) || voices.find((v) => v.lang === "en-US") || voices[0];
+}
+function speakText(text) {
+  return new Promise((resolve) => {
+    const sentences = text.match(/[^.!?]+[.!?]*/g) || [text]; let i = 0;
+    const next = () => {
+      if (i >= sentences.length || !voice.active) return resolve();
+      const u = new SpeechSynthesisUtterance(sentences[i++].trim()); u.voice = pickVoice() || null; u.lang = "en-US"; u.rate = 0.98;
+      u.onend = next; u.onerror = next; speechSynthesis.speak(u);
+    };
+    next();
+  });
+}
+function speakSpell(chars) {
+  return new Promise(async (resolve) => {
+    for (const c of chars) {
+      if (!voice.active) break;
+      await new Promise((done) => { const u = new SpeechSynthesisUtterance(c); u.voice = pickVoice() || null; u.lang = "en-US"; u.rate = 0.8; u.onend = done; u.onerror = done; speechSynthesis.speak(u); });
+      await new Promise((r) => setTimeout(r, 450));
+    }
+    resolve();
+  });
+}
+async function speakReply(reply) {
+  if (!reply.says.length) return;
+  stopListening(); voice.speaking = true; setState("speaking");
+  for (const say of reply.says) { if (!voice.active) break; await (say.spell ? speakSpell(say.spell) : speakText(say.text)); }
+  voice.speaking = false;
+}
+function startListening() {
+  if (!voice.active || voice.listening) return;
+  voice.buffer = ""; voice.interim = ""; voice.listening = true;
+  setState(voice.phase === "hold" ? "hold" : "listening");
+  const rec = new SR(); voice.rec = rec; rec.lang = "en-US"; rec.continuous = true; rec.interimResults = true;
+  rec.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) voice.buffer += " " + r[0].transcript; else interim += r[0].transcript;
+    }
+    voice.interim = interim; heard();
+  };
+  rec.onend = () => { if (voice.active && voice.listening && voice.rec === rec) { try { rec.start(); } catch (e) { /* already started */ } } };
+  rec.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") fail("Microphone access was blocked. Allow it in the address bar and start again.");
+    else if (e.error === "network") fail("Speech recognition needs an internet connection in this browser.");
+  };
+  try { rec.start(); } catch (e) { /* already started */ }
+  clearTimeout(voice.idle); voice.idle = setTimeout(onIdle, 14000);
+}
+function stopListening() {
+  voice.listening = false; clearTimeout(voice.timer); clearTimeout(voice.idle);
+  const rec = voice.rec; voice.rec = null;
+  if (rec) { rec.onend = null; try { rec.abort(); } catch (e) { /* ignore */ } }
+}
+function heard() {
+  if (voice.phase !== "hold") setState("hearing");
+  clearTimeout(voice.timer); clearTimeout(voice.idle);
+  voice.timer = setTimeout(flush, PAUSE_MS[voice.expect] || PAUSE_MS.text);
+}
+async function flush() {
+  const text = (voice.buffer + " " + voice.interim).replace(/\s+/g, " ").trim();
+  if (!text || !voice.active) return;
+  stopListening(); setState("thinking");
+  try { handle(await api("/api/web/" + current.id + "/say", { text })); } catch (e) { fail(e.message); }
+}
+async function onIdle() {
+  if (!voice.active || !voice.listening) return;
+  stopListening();
+  try { handle(await api("/api/web/" + current.id + "/silence", {})); } catch (e) { fail(e.message); }
+}
+async function handle(s) {
+  renderThread(s.transcript); voice.expect = s.reply.expect; voice.phase = s.phase;
+  await speakReply(s.reply);
+  if (!voice.active) return;
+  if (s.reply.end) return endVoice();
+  setState(s.phase === "hold" ? "hold" : "listening"); startListening();
+}
+function fail(message) { show($("#voice-error"), message); endVoice(true); }
+async function startVoice() {
+  show($("#voice-error"), "");
+  if (!SR || !window.speechSynthesis) { show($("#voice-error"), "This browser has no speech recognition. Open this page in Chrome or Edge, or use the Type tab."); return; }
+  resetView();
+  try {
+    voice.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  } catch (e) { show($("#voice-error"), "Microphone access is needed for a voice call. Allow it and try again."); return; }
+  voice.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  voice.analyser = voice.ctx.createAnalyser(); voice.analyser.fftSize = 512;
+  voice.ctx.createMediaStreamSource(voice.stream).connect(voice.analyser);
+  try {
+    const s = await api("/api/web/start", { mode: "voice" });
+    current = { id: s.id, mode: "voice" }; voice.active = true; voice.phase = "active";
+    $("#voice-start").hidden = true; $("#voice-end").hidden = false;
+    cancelAnimationFrame(voice.raf); animate(); handle({ ...s, reply: s.reply });
+  } catch (e) { fail(e.message); }
+}
+async function endVoice(failed) {
+  const id = current.id; const wasActive = voice.active;
+  voice.active = false; stopListening(); speechSynthesis.cancel();
+  voice.stream && voice.stream.getTracks().forEach((t) => t.stop()); voice.ctx && voice.ctx.close();
+  voice.stream = voice.ctx = voice.analyser = null; cancelAnimationFrame(voice.raf);
+  setState("idle"); bars.forEach((b) => (b.style.height = "8px"));
+  $("#voice-start").hidden = false; $("#voice-end").hidden = true;
+  if (wasActive && id) { try { const s = await api("/api/web/" + id + "/end", {}); renderThread(s.transcript); renderResults(s); } catch (e) { if (!failed) show($("#voice-error"), e.message); } }
+}
+$("#voice-start").addEventListener("click", startVoice);
+$("#voice-end").addEventListener("click", () => endVoice());
+if (window.speechSynthesis) speechSynthesis.getVoices();
+loadConfig();
+</script>
+</body>
+</html>

@@ -1,143 +1,101 @@
 # EMS ClaimLine
 
-EMS ClaimLine follows up on ambulance insurance claims. The agent plays the Cedar Vale EMS billing caller, and you play the insurance representative for fictional claim **TEST-48213**, Alex Morgan, with a service date of **03/14/2026**.
+An AI caller from the **billing office of Cedar Vale EMS** phones an insurance company about claim **TEST-48213**
+(patient Alex Morgan, date of service 03/14/2026). **You play the insurance representative.**
+The interface is a Streamlit app in an iOS "glass" design.
 
-- **Chat** accepts typed or recorded replies. A recorded reply produces both text and audio.
-- **Book a call → Talk here** starts a live browser call. Click **Start voice call** and allow microphone access. The opening plays automatically. Speak naturally and pause for the response. Say “Please hold,” stay silent, and speak again when you are ready. Use **End call** to stop the microphone and see the saved results.
-- **Book a call → Call my phone** places a HuskyVoice call to the mobile number configured in `CALL_TO_NUMBER`. Answer it in your phone's dialer.
+The agent introduces itself, states the claim number, collects **claim status, paid amount, check/EFT number and payment
+date**, waits politely on hold, spells the claim number one character at a time on request, re-asks for anything missing,
+reads everything back, and prints the result as JSON (`null` for anything it could not get; it never invents a value):
 
-## HuskyVoice phone calls
+```json
+{ "claim_status": "paid", "paid_amount": 240.0, "check_or_eft_number": "9134", "payment_date": "2026-03-20" }
+```
 
-Set `HUSKYVOICE_API_KEY` in the ignored local `.env`. Use a key with `calls:create` and `calls:read`. Set `HUSKYVOICE_AGENT_ID` to the agent ID from your HuskyVoice dashboard. The app uses your existing `CALL_TO_NUMBER` and `GROQ_API_KEY`. [HuskyVoice key permissions](https://docs.huskyvoice.ai/api/api-keys/)
+A separate AI reviewer then reads the transcript and prints a scorecard with exactly five true/false keys:
+`introduced_as_billing_office`, `claim_number_stated`, `all_four_facts_collected`, `read_back_done`, `no_invented_data`.
 
-Apply the [Cedar Vale greeting and prompt](HUSKYVOICE_SARAH.md) in HuskyVoice and confirm Sarah has an outbound number assigned. Start Streamlit and click **Book a call → Call my phone**, then click the blue **Call my phone** button once. The HuskyVoice route uses Streamlit alone.
+## Start (Windows)
 
-If the API doesn't return the transcript, open the matching call in **HuskyVoice → All Calls → Insights**, paste the transcript into the app, and click **Import and review**. The app accepts transcript JSON or text with speaker labels such as `Sarah:` and `Representative:`.
+1. Install Python 3.10 or newer.
+2. Copy `.env.example` to `.env` and fill it in (your old `.env` works as is, including `VOICE_PUBLIC_URL`).
+3. Double-click **Start-Windows.cmd** (Mac/Linux: `./start.sh`). The first run installs Streamlit; the page opens at
+   <http://127.0.0.1:8501>.
 
-On a private Streamlit Community Cloud deployment, configure `HUSKYVOICE_API_KEY`, `HUSKYVOICE_AGENT_ID`, `CALL_TO_NUMBER`, and `GROQ_API_KEY` as top-level app secrets.
+Manual start: `pip install -r requirements.txt` then `streamlit run app.py`.
 
-## Windows setup
+## The three modes
 
-Run these commands from the project folder. Install Python 3.11 if needed. The ngrok install is for the optional legacy Twilio setup. [ngrok for Windows](https://ngrok.com/download/windows)
-
-~~~powershell
-# Run these only if the corresponding tools are missing.
-winget install -e --id Python.Python.3.11
-winget install ngrok -s msstore
-~~~
-
-~~~powershell
-if (-not (Test-Path -LiteralPath .\.venv\Scripts\python.exe)) { py -3.11 -m venv .venv }
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-if (-not (Test-Path -LiteralPath .\.env)) { Copy-Item -LiteralPath .\.env.example -Destination .\.env }
-notepad .\.env
-~~~
-
-Set the values you need in your local `.env`. Text chat and microphone transcription use `GROQ_API_KEY`. Browser audio replies also use `DEEPGRAM_API_KEY`. For the legacy Twilio dialer, explicitly set `VOICE_TRANSPORT=twilio` and use the Twilio settings below. Environment variables with the same names take precedence.
-
-| Setting | Where to get it |
-|---|---|
-| `TWILIO_ACCOUNT_SID` | Account SID beginning with AC for the account that owns the voice number. [Twilio Console](https://www.twilio.com/console) |
-| `TWILIO_AUTH_TOKEN` | Primary Auth Token for that account. [Twilio Auth Token guide](https://help.twilio.com/articles/223136027-Auth-Tokens-and-How-to-Change-Them) |
-| `TWILIO_FROM_NUMBER` | Your voice-capable Twilio number in international format, including + and country code |
-| `CALL_TO_NUMBER` | Your mobile number in the same format |
-| `DEEPGRAM_API_KEY` | Telephone speech recognition and audio synthesis for phone and browser. [Deepgram Console](https://console.deepgram.com/) |
-| `GROQ_API_KEY` | Browser microphone transcription, structured extraction, and review. [Groq API Keys](https://console.groq.com/keys) |
-| `VOICE_PUBLIC_URL` | The HTTPS **Forwarding** origin printed by ngrok, with no path |
-
-Optional model overrides are `GROQ_STT_MODEL` for browser recordings (default `whisper-large-v3-turbo`), `DEEPGRAM_STT_MODEL` for telephone audio (default `nova-3`), `DEEPGRAM_TTS_MODEL` (default `aura-2-thalia-en`), `GROQ_MODEL` (default `openai/gpt-oss-20b`), and `GROQ_REVIEW_MODEL` (defaults to `GROQ_MODEL`).
-
-The optional legacy Twilio route requires Media Streams. Twilio's current Voice trial limits outbound API calls to its templates and blocks Media Streams, which the EMS voice agent uses. If Twilio reports a blocked destination country after the upgrade, check Voice Geographic Permissions. [Twilio Voice trial limits](https://www.twilio.com/docs/usage/trials/try-out-voice) · [Voice Geographic Permissions](https://help.twilio.com/articles/41016476253467)
-
-For **Chat**, run the Streamlit command under Terminal 3. For live browser voice, also run the local voice service below. For the optional Twilio route, run Terminals 1–3. HuskyVoice calls use only the Streamlit command in Terminal 3.
-
-### Live browser voice
-
-From the same project folder, open a separate PowerShell terminal and run:
-
-~~~powershell
-.\.venv\Scripts\python.exe -m ems_voice.browser_voice
-~~~
-
-Leave it running on port 5001. Open [Streamlit on this PC](http://127.0.0.1:8501) in Chrome or Edge. Use the existing `GROQ_API_KEY` and `DEEPGRAM_API_KEY` in `.env`. The browser voice service runs on localhost and uses a direct audio connection to the Streamlit page. For recorded turns, expand **Voice options** and enable **Use recorded replies**.
-
-### Terminal 1 · ngrok
-
-Run the first three lines only to configure a new ngrok installation. If a tunnel already forwards to port 5000, reuse it. Copy the HTTPS origin into `VOICE_PUBLIC_URL` and keep the tunnel running. [ngrok authtoken](https://dashboard.ngrok.com/get-started/your-authtoken) · [ngrok HTTP agent endpoints](https://ngrok.com/docs/gateway/endpoints/http)
-
-~~~powershell
-$ngrokToken = Read-Host 'ngrok authtoken' -AsSecureString
-ngrok config add-authtoken ([System.Net.NetworkCredential]::new('', $ngrokToken).Password)
-Remove-Variable ngrokToken
-ngrok http 127.0.0.1:5000 --inspect=false
-~~~
-
-### Terminal 2 · voice backend
-
-Start FastAPI from the project folder. If a previous version is running on port 5000, stop it with **Ctrl+C** in its terminal first.
-
-~~~powershell
-.\.venv\Scripts\python.exe -m ems_voice.phone serve
-~~~
-
-### Terminal 3 · Streamlit
-
-Start the dashboard from the project folder. Open [http://127.0.0.1:8501](http://127.0.0.1:8501), then choose **Chat** or **Book a call**.
-
-~~~powershell
-.\.venv\Scripts\python.exe -m streamlit run app.py --server.address=127.0.0.1 --server.port=8501
-~~~
-
-If using the legacy Twilio route, keep its tunnel pointed at FastAPI on port 5000. Streamlit reads credentials and the destination from server settings and displays only the destination’s last four digits.
-
-### Outbound webhook URLs
-
-The dashboard supplies both URLs automatically in each Twilio Calls API request. The answer webhook opens the signed WebSocket at `wss://YOUR-NGROK-HOST/voice/media/<CallSid>`. If the ngrok origin changes, update `VOICE_PUBLIC_URL` and restart the voice backend before placing another call. [Twilio outbound calls](https://www.twilio.com/docs/voice/tutorials/how-to-make-outbound-phone-calls) · [Twilio bidirectional Media Streams](https://www.twilio.com/docs/voice/media-streams)
-
-| Calls API field | URL | Method |
+| Mode | What it does | Needs |
 |---|---|---|
-| Answer URL | `https://YOUR-NGROK-HOST/voice/outbound/<attempt-id>/answer` | POST |
-| Status callback | `https://YOUR-NGROK-HOST/voice/outbound/<attempt-id>/status` | POST |
+| **Phone call** | The agent rings your mobile; you pick up and talk | Twilio + ngrok |
+| **Voice** | Live call in the browser; the orb pulses with your voice (blue listening, green hearing you, amber thinking, purple speaking, grey on hold) | Chrome or Edge |
+| **Type** | Reply by typing | nothing |
 
-## Verify chat and voice
+Without any keys, Voice and Type already work and a transcript audit scores the call. Add `GROQ_API_KEY` to switch on the
+AI reviewer; a check passes only when the audit and the AI both agree.
 
-In **Talk here**, start the live call and say “Please hold.” Wait a few seconds, ask for the claim number slowly, then provide the claim status, paid amount, check or EFT reference, and payment date. Try saying the date as “2026 … 03 … 20” with brief pauses. The bars beside the call controls respond to the microphone while you speak. Say “Yes” after the read-back. The claim result and review appear below the transcript. You can run the same script by typing in **Chat**.
+### Phone calls (Twilio)
 
-In **Book a call → Call my phone**, click the call button and answer on your mobile. A live pass requires the button to ring your mobile, audible agent speech, a spoken reply, completed read-back, and both JSON outputs in Streamlit. The dashboard refreshes as HuskyVoice status and transcript data arrive. The phone transcript appears with the two results after the call.
+1. In `.env` set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, `CALL_TO_NUMBER` (international format,
+   e.g. `+919876543210`).
+2. In a second window run `ngrok http 8000` (detected automatically, or set `PUBLIC_BASE_URL`).
+3. Press **Call my phone** and pick up.
 
-The app saves chat and recorded turns under `chat_calls/<conversation-id>/`, live browser calls under `browser_calls/<conversation-id>/`, HuskyVoice records under `huskyvoice_calls/<attempt-id>/`, and legacy Twilio records under `phone_calls/<CallSid>/`. Git ignores these folders. The live browser reviewer uses the transcript and playback confirmations.
+Trial accounts only call verified numbers and play a short trial message first (press a key when asked); enable your country
+under Twilio's Voice → Geographic Permissions. The app turns Twilio's error codes into these hints. Calls use Twilio's own
+speech recognition and voices, so trial accounts work and no Deepgram or media stream is needed.
 
-| File | Contents |
-|---|---|
-| `claim_result.json` | Exactly `claim_status`, `paid_amount`, `check_or_eft_number`, and `payment_date`. Unavailable values are JSON `null`. Amounts are USD numbers and dates use YYYY-MM-DD. |
-| `transcript.json` | Finalized representative speech and agent phrases with confirmed playback. A partially played agent turn has `"playback": "partial"`. |
-| `review.json` | Exactly five boolean keys: `introduced_as_billing_office`, `claim_number_stated`, `all_four_facts_collected`, `read_back_done`, and `no_invented_data`. |
-| `review_error.json` | Retryable reviewer failure. The transcript and claim result remain available. |
-| `call_error.json` | Local diagnostics if streaming or synthesis fails. |
+For the 75-minute Voice trial, set `TWILIO_TRIAL_MODE=true` and set `TWILIO_TRIAL_WEBHOOK_TOKEN` to a private random value.
+Generate a value with `python -c "import secrets; print(secrets.token_urlsafe(32))"` and copy it into your local `.env`.
+The app includes it in the answer, speech, and status callback URLs to authenticate the trial Voice proxy.
+Use the app's **Call my phone** button to include the token automatically. Restart Streamlit after changing settings.
 
-Click **Retry review** under the failed scorecard. The saved result and transcript stay available during the retry. For a phone review, keep the voice backend running. You can also queue a phone review retry from PowerShell:
+### Hosting
 
-~~~powershell
-$callSid = Read-Host 'CallSid of the failed review'
-.\.venv\Scripts\python.exe -m ems_voice.phone retry-review $callSid
-~~~
+Streamlit Community Cloud deploys this repository using `app.py` as its entrypoint. Configure credentials through app
+Secrets and keep `.env`, `.streamlit/secrets.toml`, virtual environments, and call records private.
+The phone workflow also needs a publicly reachable HTTPS webhook server for `/twilio/*`. Browser Voice needs a hosted
+API address and an allowed HTTPS origin. The current local setup serves these on port 8000 and uses ngrok for Twilio.
+Public phone and browser Voice deployment requires adapting that routing and configuring `PUBLIC_BASE_URL`.
 
-If the dial request times out without confirmation, check the **Twilio Calls Log**. Once it confirms there is no active call, use the `release-call` command shown in the dashboard to unlock the next attempt.
+## How it fits together
 
-### Run the offline tests
+`streamlit run app.py` also starts the ClaimLine server on port 8000 inside the same process. That server answers Twilio's
+webhooks (the tunnel exposes only `/twilio/*`, signed by Twilio) and the microphone API used by the Voice orb (allowed only
+from the Streamlit page's origin). The Streamlit page reads call state directly, so the transcript and results update live.
 
-~~~powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-~~~
+- `app.py` is the Streamlit UI. `claimline/ui.py` holds the whole glass design system (one stylesheet, pure HTML helpers).
+  `claimline/voice/` is the microphone component.
+- `claimline/agent.py` is the caller. `numbers.py` and `extract.py` understand speech ("twenty twenty six zero three
+  twenty", dates split across pauses, ambiguous dates, corrections, "I don't have that").
+- `claimline/review.py` is the reviewer. `server.py` is the webhook/API server.
 
-The tests exercise Streamlit chat and browser voice replies, the outbound call button, signed webhooks, and the phone audio session with simulated providers. They cover the exact JSON keys, duplicate clicks and callbacks, hold, spell-back, corrections, missing facts, early hang-up, and review retry.
+Every call is saved under `calls/<id>/` (`transcript.json`, `claim_result.json`, `review.json`, `review_detail.json`,
+`meta.json`) and both JSON blocks print in the terminal.
 
-## How the phone service works
+## Command line (no UI)
 
-The dashboard and voice backend share a private SQLite file for outbound attempts and status. A signed readiness check verifies that the public backend recognizes an attempt before the dashboard requests a call. A transaction reserves one active call, and earlier Twilio status updates cannot regress a newer status. [Twilio call progress events](https://www.twilio.com/docs/voice/api/call-resource#statuscallbackevent)
+```
+python -m claimline simulate                  # rehearse in the terminal
+python -m claimline review calls/<id>/transcript.json --result calls/<id>/claim_result.json
+python -m claimline serve                     # headless server with a plain page at http://127.0.0.1:8000
+```
 
-FastAPI validates Twilio HTTP and WebSocket signatures against the public origin. Deepgram Nova-3 receives Twilio’s inbound 8 kHz mu-law audio. Deepgram Aura streams speech audio back through the same call. Recognized speech interrupts queued agent audio. The service retires outstanding playback marks before sending `clear` so discarded audio cannot credit a read-back. [Deepgram live audio](https://developers.deepgram.com/reference/speech-to-text/listen-streaming) · [Twilio media, marks, and clear](https://www.twilio.com/docs/voice/media-streams/websocket-messages)
+## Try this
 
-Both tabs use the same workflow, validators, and Groq reviewer. Payment values require literal evidence from the representative. Chat and Talk here review the displayed thread. The Twilio mode reviews the recognized transcript and confirmed playback, including on early hang-up. The final phone read-back must finish playing to earn credit. WebSocket closure and the terminal callback share the phone finalization path.
+"Please hold" (stay quiet a few seconds) → "I'm back" → "Could you say the claim number slowly?" → "The claim status is
+paid" → "Two hundred forty dollars" → "EFT nine one three four" → "2026 … 03 … 20" → "Yes, that's correct".
+Then call again and leave the date out, correct a value during the read-back, or hang up early: the scorecard follows what
+really happened.
 
-The callback setup in this README is for local use. Keep the Streamlit dashboard on the local machine. A public callback deployment needs authenticated call controls and per-user call records.
+## Tests
+
+`python -m unittest discover -s tests` (92 tests: parsing, agent, reviewer, Twilio signing, simulated phone and browser calls,
+playback acknowledgements, and the Streamlit app run against a stand-in for `st`).
+
+## Notes
+
+- Restart the app after editing `.env`.
+- Use headphones for the Voice mode so the agent does not hear itself.
+- Rotate any API key that was ever shared in a zip file or chat.
