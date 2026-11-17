@@ -1,10 +1,11 @@
-// Live microphone call. Runs in the browser: speech recognition + speech synthesis, talking to the local ClaimLine API.
+// Live microphone call. Speech runs in the browser; requests use Streamlit's component connection.
 // Call state lives on window so a Streamlit re-render never drops an active call.
 const S = (window.__claimlineVoice = window.__claimlineVoice || {
   active: false, listening: false, speaking: false, rec: null, buffer: "", interim: "", timer: null, idle: null,
   expect: "text", phase: "active", stream: null, ctx: null, analyser: null, level: 0, state: "idle", raf: 0,
-  tick: 0, id: null, api: "", ui: null, kill: null, setStateValue: null,
+  tick: 0, id: null, ui: null, kill: null, setStateValue: null, starting: false,
 });
+S.requestQueue = S.requestQueue || Promise.resolve();
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const PAUSE_MS = { text: 1700, number: 2700, date: 3800, confirm: 1500 };
 const LABELS = {
@@ -25,13 +26,24 @@ function setState(state) {
   S.ui.label.textContent = label; S.ui.hint.textContent = hint;
 }
 function showError(text) { if (alive()) { S.ui.err.textContent = text || ""; S.ui.err.hidden = !text; } }
-function syncButtons() { if (alive()) { S.ui.start.hidden = S.active; S.ui.end.hidden = !S.active; } }
+function syncButtons() { if (alive()) { S.ui.start.hidden = S.active; S.ui.start.disabled = S.starting; S.ui.end.hidden = !S.active; } }
 
-async function api(path, body) {
-  const res = await fetch(S.api + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Request failed (" + res.status + ")");
-  return data;
+function api(path, body) {
+  const parts = path.split("/");
+  const send = () => new Promise((resolve, reject) => {
+    if (!alive() || !S.setStateValue) return reject(new Error("The voice panel was closed. Please start again."));
+    const id = crypto.randomUUID();
+    const timer = setTimeout(() => {
+      if (S.pending && S.pending.id === id) S.pending = null;
+      reject(new Error("The connection to Streamlit timed out. Refresh the page and try again."));
+    }, 120000);
+    S.pending = { id, resolve, reject, timer };
+    S.setStateValue("request", { id, action: parts[parts.length - 1], call_id: parts.length > 4 ? parts[3] : null, body: body || {} });
+  });
+  // Only one message is in flight so reruns cannot replace an unprocessed request.
+  const result = S.requestQueue.then(send, send);
+  S.requestQueue = result.catch(() => {});
+  return result;
 }
 
 function animate() {
@@ -162,46 +174,71 @@ async function handle(s) {
 function fail(message) { showError(message); endVoice(true); }
 
 async function startVoice() {
+  if (S.starting || S.active) return;
+  S.starting = true; syncButtons();
   showError("");
-  if (!SR || !window.speechSynthesis) { showError("This browser has no speech recognition. Open the app in Chrome or Edge, or use the Type mode."); return; }
+  if (!SR || !window.speechSynthesis) {
+    showError("This browser has no speech recognition. Open the app in Chrome or Edge, or use the Type mode.");
+    S.starting = false; syncButtons(); return;
+  }
   try {
     S.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-  } catch (e) { showError("Microphone access is needed for a voice call. Allow it and try again."); return; }
-  S.ctx = new (window.AudioContext || window.webkitAudioContext)();
-  S.analyser = S.ctx.createAnalyser(); S.analyser.fftSize = 512;
-  S.ctx.createMediaStreamSource(S.stream).connect(S.analyser);
+  } catch (e) {
+    showError("Microphone access is needed for a voice call. Allow it and try again.");
+    S.starting = false; syncButtons(); return;
+  }
   try {
+    if (!alive()) return endVoice(true, false);
+    S.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    S.analyser = S.ctx.createAnalyser(); S.analyser.fftSize = 512;
+    S.ctx.createMediaStreamSource(S.stream).connect(S.analyser);
     const s = await api("/api/web/start", { mode: "voice" });
+    if (!alive()) return endVoice(true, false);
     S.id = s.id; S.active = true; S.phase = "active"; syncButtons();
     if (S.setStateValue) S.setStateValue("call_id", s.id);
     await handle(s);
   } catch (e) {
-    showError(/fetch|network/i.test(e.message) ? "Could not reach ClaimLine at " + S.api + ". Is the app still running?" : e.message);
+    showError(e.message);
     endVoice(true);
+  } finally {
+    S.starting = false; syncButtons();
   }
 }
-async function endVoice(failed) {
+async function endVoice(failed, notifyServer = true) {
   const id = S.id, wasActive = S.active;
   S.active = false; stopListening(); speechSynthesis.cancel();
   if (S.stream) S.stream.getTracks().forEach((t) => t.stop());
   if (S.ctx) S.ctx.close();
   S.stream = S.ctx = S.analyser = null; S.level = 0;
   setState("idle"); syncButtons();
-  if (wasActive && id) { try { await api("/api/web/" + id + "/end", {}); } catch (e) { if (!failed) showError(e.message); } }
+  if (notifyServer && wasActive && id) { try { await api("/api/web/" + id + "/end", {}); } catch (e) { if (!failed) showError(e.message); } }
 }
 
 export default function (component) {
   const { parentElement, data, setStateValue } = component;
   clearTimeout(S.kill);
-  S.api = (data && data.api) || S.api; S.setStateValue = setStateValue;
+  S.setStateValue = setStateValue;
   const q = (s) => parentElement.querySelector(s);
   S.ui = { wrap: q(".wrap"), label: q(".label"), hint: q(".hint"), err: q(".err"), start: q(".start"), end: q(".end"),
            bars: [...parentElement.querySelectorAll(".bars i")] };
   S.ui.start.onclick = startVoice; S.ui.end.onclick = () => endVoice();
   setState(S.state); syncButtons();
+  const response = data && data.response;
+  if (response && S.pending && response.id === S.pending.id) {
+    const pending = S.pending; S.pending = null; clearTimeout(pending.timer);
+    if (response.error) pending.reject(new Error(response.error)); else pending.resolve(response.data);
+  }
   if (!S.raf) animate();
   return () => {
     // A re-render calls this and then the function above again. If no new render arrives, the panel was removed.
-    S.kill = setTimeout(() => { if (S.active && !alive()) endVoice(true); }, 800);
+    S.kill = setTimeout(() => {
+      if (alive()) return;
+      if (S.pending) {
+        const pending = S.pending; S.pending = null; clearTimeout(pending.timer);
+        pending.reject(new Error("The voice panel was closed."));
+      }
+      if (S.active || S.starting) endVoice(true, false);
+      S.setStateValue = null;
+    }, 800);
   };
 }

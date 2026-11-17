@@ -55,15 +55,20 @@ Use the app's **Call my phone** button to include the token automatically. Resta
 
 Streamlit Community Cloud deploys this repository using `app.py` as its entrypoint. Configure credentials through app
 Secrets and keep `.env`, `.streamlit/secrets.toml`, virtual environments, and call records private.
-The phone workflow also needs a publicly reachable HTTPS webhook server for `/twilio/*`. Browser Voice needs a hosted
-API address and an allowed HTTPS origin. The current local setup serves these on port 8000 and uses ngrok for Twilio.
-Public phone and browser Voice deployment requires adapting that routing and configuring `PUBLIC_BASE_URL`.
+Browser **Voice** and **Type** work through Streamlit's connection, including on Community Cloud. Voice does not need
+ngrok, `PUBLIC_BASE_URL`, Twilio credentials, or a separate public port. Open the hosted page in Chrome or Edge, select
+Voice, and allow microphone access. Speech recognition requires an internet connection.
+
+The **Phone call** workflow separately needs a publicly reachable HTTPS webhook server for `/twilio/*`, sharing the
+same call state as the UI. The local setup serves these on port 8000 and uses ngrok for Twilio. Setting `PUBLIC_BASE_URL`
+alone does not expose Community Cloud's internal port; public phone deployment still requires that webhook routing.
 
 ## How it fits together
 
 `streamlit run app.py` also starts the ClaimLine server on port 8000 inside the same process. That server answers Twilio's
-webhooks (the tunnel exposes only `/twilio/*`, signed by Twilio) and the microphone API used by the Voice orb (allowed only
-from the Streamlit page's origin). The Streamlit page reads call state directly, so the transcript and results update live.
+webhooks (the tunnel exposes only `/twilio/*`, authenticated by Twilio signatures or the private trial token).
+The Voice orb sends session-owned requests and receives replies through Streamlit's component state. The browser never
+needs to connect to port 8000. The page reads call state directly, so the transcript and results update live.
 
 - `app.py` is the Streamlit UI. `claimline/ui.py` holds the whole glass design system (one stylesheet, pure HTML helpers).
   `claimline/voice/` is the microphone component.
@@ -91,8 +96,11 @@ really happened.
 
 ## Tests
 
-`python -m unittest discover -s tests` (105 tests: parsing, agent, reviewer, Twilio signing, simulated phone and browser calls,
-playback acknowledgements, and the Streamlit app run against a stand-in for `st`).
+`python -m unittest discover -s tests` (115 tests: parsing, agent, reviewer, Twilio signing, simulated phone and browser calls,
+playback acknowledgements, session-owned Voice messages, and the Streamlit app run against a stand-in for `st`).
+
+With Node.js installed, `node --test tests/voice_component.test.mjs` runs five frontend checks covering the Streamlit
+request/response connection, speech playback errors and interruption, microphone cleanup, and queued call restarts.
 
 ## Notes
 

@@ -53,7 +53,7 @@ class Rerun(Exception):
     pass
 
 
-def make_streamlit(mode, *, clicks=(), typed="", form=None, orb_call_id=None, state=None):
+def make_streamlit(mode, *, clicks=(), typed="", form=None, orb_call_id=None, orb_request=None, state=None):
     st = MagicMock(name="streamlit")
     st.session_state = state if state is not None else SessionState()
     st.markdown_calls = []
@@ -66,7 +66,7 @@ def make_streamlit(mode, *, clicks=(), typed="", form=None, orb_call_id=None, st
     st.form_submit_button = lambda label, **k: form == label
     st.columns = lambda n: [SimpleNamespace(form_submit_button=lambda label, **k: form == label) for _ in range(n)]
     st.rerun = MagicMock(side_effect=Rerun)
-    orb = MagicMock(return_value=SimpleNamespace(call_id=orb_call_id))
+    orb = MagicMock(return_value=SimpleNamespace(call_id=orb_call_id, request=orb_request))
     st.components.v2.component = MagicMock(return_value=orb)
     return st
 
@@ -138,17 +138,55 @@ class AppSmokeTest(unittest.TestCase):
 
     def test_voice_mode_mounts_orb_and_shows_live_transcript(self):
         started = self.service.web_start("voice")
-        st = make_streamlit("Voice", orb_call_id=started["id"])
+        st = make_streamlit("Voice", orb_call_id=started["id"], state=SessionState(voice_call_id=started["id"]))
         self.run_app(st)
         kwargs = st.components.v2.component.return_value.call_args.kwargs
-        self.assertEqual(kwargs["data"], {"api": "http://127.0.0.1:0"})
+        self.assertEqual(kwargs["data"], {"response": None})
         self.assertEqual(st.session_state["view_id"], started["id"])
         self.assertIn("billing office of Cedar Vale EMS", self.page(st))
 
-    def test_voice_mode_reports_port_conflict(self):
+    def test_voice_mode_still_mounts_during_webhook_port_conflict(self):
         st = make_streamlit("Voice")
         self.run_app(st, problem="Port 8000 is already in use")
         self.assertIn("Port 8000 is already in use", self.page(st))
+        st.components.v2.component.assert_called_once()
+
+    def test_voice_request_is_processed_once_and_returned_through_component(self):
+        state = SessionState()
+        request = {"id": "request-1", "action": "start", "body": {}}
+        self.assertEqual(self.run_app(make_streamlit("Voice", orb_request=request, state=state)), "rerun")
+        call_id = state["voice_call_id"]
+        self.assertEqual(state["view_id"], call_id)
+        self.assertEqual(state["voice_response"]["data"]["id"], call_id)
+        self.assertEqual(state["voice_response"]["id"], "request-1")
+        st = make_streamlit("Voice", orb_request=request, state=state)
+        self.assertEqual(self.run_app(st), "ok")
+        self.assertEqual(len(self.service.sessions), 1)
+        self.assertEqual(st.components.v2.component.return_value.call_args.kwargs["data"],
+                         {"response": state["voice_response"]})
+
+    def test_voice_request_errors_return_to_browser(self):
+        state = SessionState()
+        request = {"id": "request-1", "action": "say", "call_id": "another-call", "body": {"text": "paid"}}
+        self.assertEqual(self.run_app(make_streamlit("Voice", orb_request=request, state=state)), "rerun")
+        self.assertIn("does not belong", state["voice_response"]["error"])
+        self.assertEqual(len(self.service.sessions), 0)
+
+    def test_voice_component_cannot_select_another_users_transcript(self):
+        started = self.service.web_start("voice")
+        st = make_streamlit("Voice", orb_call_id=started["id"])
+        self.run_app(st)
+        self.assertIsNone(st.session_state["view_id"])
+        self.assertNotIn("billing office of Cedar Vale EMS", self.page(st))
+
+    def test_switching_mode_ends_owned_voice_without_crediting_unplayed_speech(self):
+        started = self.service.web_start("voice")
+        state = SessionState(voice_call_id=started["id"], view_id=started["id"])
+        self.run_app(make_streamlit("Type", state=state))
+        self.assertIsNone(state["voice_call_id"])
+        session = self.service.get(started["id"])
+        self.assertTrue(session.finalized)
+        self.assertFalse(session.scorecard["introduced_as_billing_office"])
 
     def test_type_mode_full_chat_through_the_ui(self):
         state = SessionState()

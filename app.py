@@ -1,7 +1,7 @@
 """EMS ClaimLine: Streamlit front end (iOS glass design).
 
 Run with:  streamlit run app.py
-The same process also serves the Twilio webhooks and the microphone API on PORT (default 8000).
+Browser Voice uses Streamlit's connection. The process also serves Twilio webhooks on PORT (default 8000).
 """
 
 import streamlit as st
@@ -11,7 +11,7 @@ from claimline.agent import CLAIM
 from claimline.config import Settings
 from claimline.launch import start_background
 from claimline.server import ApiError
-from claimline.voice_component import load_orb
+from claimline.voice_component import dispatch_voice_request, load_orb
 
 MODES = ("Phone call", "Voice", "Type")
 POLL_SECONDS = 1.5
@@ -36,6 +36,9 @@ settings, service, problem = runtime()
 state_store = st.session_state
 state_store.setdefault("view_id", None)    # the call whose conversation is on screen
 state_store.setdefault("chat_id", None)    # an open typed chat
+state_store.setdefault("voice_call_id", None)  # owned by this browser's Streamlit session
+state_store.setdefault("voice_request_id", None)
+state_store.setdefault("voice_response", None)
 state_store.setdefault("notice", "")
 
 
@@ -77,13 +80,22 @@ def phone_panel(info, current):
 
 def voice_panel():
     st.markdown('<div class="cl-h">Talk here</div>', unsafe_allow_html=True)
-    if problem:
-        st.markdown('<p class="cl-hint">Unavailable until the port conflict above is fixed.</p>', unsafe_allow_html=True)
-        return
-    result = voice_orb()(key="voice_orb", data={"api": f"http://127.0.0.1:{settings.port}"},
-                         default={"call_id": None}, on_call_id_change=lambda: None)
+    result = voice_orb()(key="voice_orb", data={"response": state_store.voice_response},
+                         default={"call_id": None, "request": None},
+                         on_call_id_change=lambda: None, on_request_change=lambda: None)
+    request = getattr(result, "request", None)
+    if isinstance(request, dict) and request.get("id") != state_store.voice_request_id:
+        state_store.voice_request_id = request.get("id")
+        try:
+            data = dispatch_voice_request(service, request, state_store.voice_call_id)
+            if request.get("action") == "start":
+                state_store.voice_call_id = state_store.view_id = data["id"]
+            state_store.voice_response = {"id": request.get("id"), "data": data}
+        except ApiError as error:
+            state_store.voice_response = {"id": request.get("id"), "error": str(error)}
+        st.rerun()  # deliver the response through the component's data
     call_id = result.call_id if result is not None else None
-    if call_id and call_id != state_store.view_id:
+    if call_id and call_id == state_store.voice_call_id and call_id != state_store.view_id:
         state_store.view_id = call_id
 
 
@@ -156,6 +168,14 @@ st.markdown(ui.hero(CLAIM), unsafe_allow_html=True)
 if problem:
     st.markdown(ui.alert(problem, "error"), unsafe_allow_html=True)
 mode = st.segmented_control("Mode", MODES, default=MODES[0], key="mode", label_visibility="collapsed") or MODES[0]
+if mode != "Voice" and state_store.voice_call_id:
+    try:
+        session = service.get(state_store.voice_call_id)
+        if not session.finalized:
+            service.web_end(session.id)
+    except ApiError:
+        pass  # the runtime may have restarted
+    state_store.voice_call_id = None
 info = service.config_info()
 current = current_state()
 with st.container(key="glass_action"):
