@@ -1,10 +1,16 @@
 """Mount the live-microphone orb as a Streamlit Components v2 component."""
 
+from hashlib import sha256
 from pathlib import Path
 
 from .server import ApiError, Service
 
 ASSETS = Path(__file__).with_name("voice")
+
+
+def orb_asset_version() -> str:
+    """Invalidate Streamlit's cached component when its frontend files change."""
+    return sha256(b"\0".join((ASSETS / name).read_bytes() for name in ("orb.html", "orb.css", "orb.js"))).hexdigest()
 
 
 def dispatch_voice_request(service: Service, request: dict, owned_call_id: str | None) -> dict:

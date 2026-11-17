@@ -11,7 +11,7 @@ from claimline.agent import CLAIM
 from claimline.config import Settings
 from claimline.launch import start_background
 from claimline.server import ApiError
-from claimline.voice_component import dispatch_voice_request, load_orb
+from claimline.voice_component import dispatch_voice_request, load_orb, orb_asset_version
 
 MODES = ("Phone call", "Voice", "Type")
 POLL_SECONDS = 1.5
@@ -28,7 +28,8 @@ def runtime():
 
 
 @st.cache_resource(show_spinner=False)
-def voice_orb():
+def voice_orb(asset_version):
+    """Cache registration by frontend content so deployments replace old JavaScript."""
     return load_orb()
 
 
@@ -80,7 +81,7 @@ def phone_panel(info, current):
 
 def voice_panel():
     st.markdown('<div class="cl-h">Talk here</div>', unsafe_allow_html=True)
-    result = voice_orb()(key="voice_orb", data={"response": state_store.voice_response},
+    result = voice_orb(orb_asset_version())(key="voice_orb", data={"response": state_store.voice_response},
                          default={"call_id": None, "request": None},
                          on_call_id_change=lambda: None, on_request_change=lambda: None)
     request = getattr(result, "request", None)
