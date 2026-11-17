@@ -111,7 +111,7 @@ def replay(transcript: list) -> dict:
                 unavailable.discard(key)
             for key in res.unavailable:
                 if key not in res.values:
-                    if key in facts and key != focus:
+                    if key in facts:
                         del facts[key]
                         last_change = index
                     unavailable.add(key)

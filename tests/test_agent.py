@@ -47,7 +47,10 @@ class HappyPath(unittest.TestCase):
         self.assertEqual(asked.count("What amount was paid?"), 0)
 
     def test_yes_variants_end_the_call(self):
-        for yes in ["Yes. Correct.", "yeah that's right", "Correct", "Everything is correct"]:
+        for yes in ["Yes. Correct.", "yeah that's right", "Correct", "Everything is correct",
+                    "OK, everything is OK", "The read back is correct, no details to be changed",
+                    "But no, everything is correct", "No changes are needed", "Nothing needs to be changed",
+                    "I don't want any changes", "No details need to be changed"]:
             agent, replies = run(["paid", "240 dollars", "EFT 9134", "March 20 2026", yes])
             self.assertTrue(replies[-1].end, yes)
 
@@ -140,6 +143,62 @@ class MissingFacts(unittest.TestCase):
 
 
 class Corrections(unittest.TestCase):
+    def test_genuine_errors_still_require_a_correction(self):
+        for text in ["No, the amount is wrong", "Everything is correct except the payment date is wrong",
+                     "No changes except the EFT number is incorrect", "Not all details are correct",
+                     "Yes, please change the date", "I'm not sure", "No, that's incorrect"]:
+            with self.subTest(text=text):
+                agent, _ = run(["paid", "450", "EFT 944412", "20 December 2026"])
+                reply = agent.hear(text)
+                self.assertFalse(reply.end)
+                self.assertIn("Which detail", reply.text)
+
+    def test_payment_amount_does_not_silently_replace_unpaid_status(self):
+        agent, replies = run(["The current claim status is unpaid", "Uh, it is unpaid", "I paid $450"])
+        self.assertEqual(agent.result()["claim_status"], "not paid")
+        self.assertEqual(agent.result()["paid_amount"], 450.0)
+        self.assertIn("confirm the current status", replies[-1].text)
+        reply = agent.hear("The claim status is paid")
+        self.assertEqual(agent.result()["claim_status"], "paid")
+        self.assertIn("check or EFT", reply.text)
+
+    def test_user_conversation_updates_all_facts_and_accepts_confirmation(self):
+        agent, replies = run(["The current claim status is unpaid", "Uh, it is unpaid", "I paid $450",
+                              "The claim status is paid", "The aft number is 944412", "20th December 2026",
+                              "No, the paid amount is $750",
+                              "No, the paid amount is $800 and the payment date is 21 December 2026 and the AFT number is 922212",
+                              "OK, can you spell the?", "Yes, the service date and the patient name",
+                              "CPT number. CPT number."])
+        self.assertIn("don't have a CPT code", replies[-1].text)
+        self.assertFalse(replies[-1].end)
+        self.assertEqual(agent.result(), {"claim_status": "paid", "paid_amount": 800.0,
+                                          "check_or_eft_number": "922212", "payment_date": "2026-12-21"})
+        self.assertTrue(agent.hear("The read back is correct, no details to be changed").end)
+        self.assertTrue(all(score(agent).values()))
+
+    def test_unpaid_status_can_be_confirmed_without_repeating_the_status_question(self):
+        agent, _ = run(["unpaid", "I paid $450", "It is unpaid", "EFT 944412", "20 December 2026"])
+        self.assertEqual(agent.result()["claim_status"], "not paid")
+        self.assertEqual(agent.phase, "confirming")
+        self.assertTrue(agent.hear("Everything is correct").end)
+
+    def test_unpaid_claim_does_not_invent_zero_amount_or_payment_details(self):
+        agent, _ = run(["unpaid", "It is unpaid", "The paid amount is unavailable",
+                        "The EFT number is unavailable", "The EFT number is unavailable",
+                        "The payment date is unavailable", "The payment date is unavailable", "Everything is OK"])
+        self.assertEqual(agent.result(), {"claim_status": "not paid", "paid_amount": None,
+                                          "check_or_eft_number": None, "payment_date": None})
+        self.assertEqual(agent.phase, "ended")
+        self.assertTrue(score(agent)["no_invented_data"])
+
+    def test_value_change_with_an_information_request_is_read_back(self):
+        agent, _ = run(["paid", "450", "EFT 944412", "20 December 2026"])
+        reply = agent.hear("The amount is $800, and please spell the claim number")
+        self.assertIn("read back", reply.text)
+        self.assertIn("$800.00", reply.text)
+        self.assertTrue(agent.hear("Everything is OK").end)
+        self.assertTrue(score(agent)["read_back_done"])
+
     def test_late_corrections_are_read_back_before_ending(self):
         agent, _ = run(["paid", "240 dollars", "EFT 9134", "March 20 2026"])
         for amount in range(241, 251):

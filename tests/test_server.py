@@ -94,6 +94,59 @@ class ServerCase(unittest.TestCase):
 
 
 class ChatApi(ServerCase):
+    def test_slow_reviewer_keeps_the_call_in_reviewing_state(self):
+        from claimline.review import CHECKS
+        _, state = self.api("/api/web/start", {"mode": "chat"})
+        call_id = state["id"]
+        for message in ("paid", "450", "EFT 944412", "20 December 2026", "yes"):
+            self.api(f"/api/web/{call_id}/say", {"text": message})
+        entered, release = threading.Event(), threading.Event()
+
+        class SlowAI:
+            enabled = True
+
+            def json_object(self, *args):
+                entered.set()
+                release.wait(timeout=3)
+                return {**{key: True for key in CHECKS}, "notes": ""}
+
+        self.service.groq = SlowAI()
+        worker = threading.Thread(target=self.service.web_end, args=(call_id,), daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(timeout=3))
+            _, state = self.api(f"/api/calls/{call_id}")
+            self.assertTrue(state["reviewing"])
+            self.assertFalse(state["finished"])
+            self.assertIsNone(state["scorecard"])
+        finally:
+            release.set()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        _, state = self.api(f"/api/calls/{call_id}")
+        self.assertTrue(state["finished"])
+        self.assertFalse(state["reviewing"])
+        self.assertTrue(all(state["scorecard"].values()))
+
+    def test_unexpected_ai_failure_still_finishes_the_transcript_audit(self):
+        _, state = self.api("/api/web/start", {"mode": "chat"})
+        call_id = state["id"]
+        self.api(f"/api/web/{call_id}/say", {"text": "paid"})
+
+        class BrokenAI:
+            enabled = True
+
+            def json_object(self, *args):
+                raise RuntimeError("Unexpected reviewer failure")
+
+        self.service.groq = BrokenAI()
+        with self.assertLogs("claimline", level="ERROR"):
+            _, state = self.api(f"/api/web/{call_id}/end", {})
+        self.assertTrue(state["finished"])
+        self.assertFalse(state["reviewing"])
+        self.assertEqual(state["review_method"], "transcript audit")
+        self.assertFalse(state["scorecard"]["all_four_facts_collected"])
+
     def test_voice_preflight_allows_actual_ui_port_and_rejects_other_origins(self):
         self.service.settings = replace(self.settings, ui_origins=Settings._origins("", "8502"))
         for origin in ("http://127.0.0.1:8502", "http://localhost:8502"):

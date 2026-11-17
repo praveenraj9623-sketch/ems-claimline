@@ -57,6 +57,14 @@ class Dates(unittest.TestCase):
 
 
 class Fields(unittest.TestCase):
+    def test_amount_statement_does_not_imply_claim_status(self):
+        for focus in ("paid_amount", "claim_status", None):
+            self.assertEqual(values("I paid $450", focus), {"paid_amount": 450.0})
+        self.assertEqual(values("The claim status is unpaid but I paid $450", "claim_status"),
+                         {"claim_status": "not paid", "paid_amount": 450.0})
+        self.assertEqual(values("The claim was paid for $450", "paid_amount"),
+                         {"claim_status": "paid", "paid_amount": 450.0})
+
     def test_unrelated_numbers_are_not_payment_facts(self):
         cases = [
             ("I don't know the paid amount. My extension is 450.", "paid_amount"),

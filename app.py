@@ -137,7 +137,9 @@ def conversation():
             return
         st.markdown(f'<div class="cl-glass"><div class="cl-h">Conversation</div>'
                     f'{ui.transcript(now["transcript"], now["phase"])}</div>', unsafe_allow_html=True)
-        if now["finished"]:
+        if now.get("reviewing"):
+            st.markdown('<p class="cl-hint">Reviewing the call…</p>', unsafe_allow_html=True)
+        elif now["finished"]:
             if now["scorecard"]:
                 st.markdown(ui.results_cards(now["result"], now["scorecard"], now["review_method"]), unsafe_allow_html=True)
             else:

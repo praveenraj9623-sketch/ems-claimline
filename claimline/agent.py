@@ -60,14 +60,45 @@ CLAIM_TALK = re.compile(r"\b(?:claim|id|reference)\b|\bnumber\b", re.I)
 ASK_CLAIM = re.compile(
     r"(?:what(?:'s| is| was)|(?:give|read|say|confirm|verify|repeat|provide)(?: me| us)?(?: the| that| your)?)"
     r"[^.?!]{0,25}\bclaim (?:number|id)\b|\bclaim (?:number|id) (?:again|please)\b|\bwhich claim\b", re.I)
-IDENTITY = re.compile(r"\b(?:patient(?:'s)? name|name of the patient|who is the patient|date of service|dos\b)", re.I)
+IDENTITY = re.compile(r"\b(?:patient(?:'s)? name|name of the patient|who is the patient|date of service|service date|dos\b)", re.I)
+CPT_REQUEST = re.compile(r"\bcpt\b", re.I)
 END_CALL = re.compile(
     r"\b(?:that(?:'s| is) (?:all|everything|it)(?: i (?:have|can (?:share|provide|give)))?|i (?:don't|do not) have (?:any )?more|"
     r"nothing (?:else|more)|no other (?:information|details)|we can end the call|i have to go|i need to go|i must go|i have to leave)\b", re.I)
 YES = re.compile(
-    r"\b(?:yes|yeah|yep|yup|correct|right|confirm(?:ed)?|affirmative|exactly|perfect|sounds good|all good|that'?s it|you got it|spot on|good)\b", re.I)
+    r"\b(?:yes|yeah|yep|yup|correct|right|confirm(?:ed)?|affirmative|exactly|perfect|sounds good|all good|that'?s it|you got it|spot on|good|ok(?:ay)?|fine)\b", re.I)
 NO = re.compile(
     r"\b(?:no|nope|incorrect|wrong|not (?:right|correct|quite)|negative|change|actually|wait|mistake)\b", re.I)
+NO_CHANGES = re.compile(
+    r"\bno (?:further |other )?(?:(?:details?|information|values?) (?:(?:need(?:s)?|have|has) )?to (?:be )?)?"
+    r"(?:changes?|corrections?|mistakes?|changed|corrected)(?: (?:are|is))?(?: (?:needed|required|necessary))?\b|"
+    r"\bno need to (?:change|correct|update)(?: anything)?\b|"
+    r"\bnothing(?: else)? (?:needs? |requires? )?(?:to be |to |be )?(?:changed|changing|change|corrected|correction|updating|updated)\b|"
+    r"\b(?:i )?(?:don't|do not) (?:need|want) (?:any )?(?:changes|corrections)\b", re.I)
+REJECTED_DETAILS = re.compile(
+    r"\b(?:incorrect|wrong|nope|negative|change|mistakes?|wait|"
+    r"not (?:all|everything|right|correct|quite|ok(?:ay)?|good|accurate|sure)|"
+    r"(?:isn't|is not|aren't|are not) (?:right|correct|ok(?:ay)?|accurate))\b", re.I)
+CONFIRMED_DETAILS = re.compile(
+    r"\b(?:everything|all(?: (?:the )?(?:details|information|values))?|"
+    r"(?:the )?(?:read[ -]?back|details|information|values)) "
+    r"(?:is|are|looks?|sounds?|seems?) (?:all )?(?:correct|right|ok(?:ay)?|good|fine|accurate)\b|"
+    r"\b(?:that's|that is|it's|it is) (?:correct|right|ok(?:ay)?|good|fine|accurate)\b", re.I)
+
+
+def confirmation_answer(text: str) -> bool | None:
+    """Interpret approval while keeping explicit errors and requested changes open."""
+    no_changes = bool(NO_CHANGES.search(text))
+    remaining = NO_CHANGES.sub(" ", text)
+    if REJECTED_DETAILS.search(remaining):
+        return False
+    if no_changes or CONFIRMED_DETAILS.search(remaining):
+        return True
+    if NO.search(remaining):
+        return False
+    if re.search(r"\?|\b(?:what|which|when|who|why|how|can you|could you|would you)\b", remaining):
+        return None
+    return True if YES.search(remaining) else None
 
 
 def clean(text: str) -> str:
@@ -164,6 +195,7 @@ class Agent:
         self.readbacks = 0
         self.confirm_failures = 0
         self.confirmed = False
+        self.payment_status_checked = False
 
     # ------------------------------------------------------------ output
     def _log(self, speaker, text):
@@ -195,6 +227,9 @@ class Agent:
         return self._speak([Say(OPENING_TEXT, ssml=OPENING_SSML, interruptible=False)])
 
     def _ask(self, key, prefix="") -> Reply:
+        if key == "paid_amount" and self.attempts[key] == 0 \
+                and self.facts.get("claim_status") and self.facts["claim_status"].value == "not paid":
+            prefix = (prefix + " If no payment amount is available, please say 'unavailable'.").strip()
         self.focus = key
         self.attempts[key] += 1
         self.last_question = QUESTIONS[key]
@@ -206,6 +241,9 @@ class Agent:
             return "Sorry, I didn't catch that."
         if key in res.unavailable:
             return "Understood. If you're able to look it up, could you double-check?"
+        if key == "paid_amount" and res.values.get("claim_status") \
+                and res.values["claim_status"].value == "not paid":
+            return "I understand the claim is unpaid. You can say 'unavailable' for the payment amount."
         if key == "payment_date" and (res.fragment or "payment_date" in res.ambiguous):
             if "payment_date" in res.ambiguous:
                 return "I want to be sure I record the right day. Please say the month by name, like March 20, 2026."
@@ -215,6 +253,9 @@ class Agent:
         return "Sorry, I didn't catch that."
 
     def _advance(self, res: Ingest | None = None, prefix: str = "") -> Reply:
+        clarification = self._clarify_payment_status()
+        if clarification is not None:
+            return clarification
         for key in KEYS:
             if key in self.facts or self.attempts[key] >= 2:
                 continue
@@ -222,6 +263,16 @@ class Agent:
                 return self._ask(key, prefix)
             return self._ask(key, (prefix + " " + self._reask_prefix(key, res)).strip())
         return self._read_back()
+
+    def _clarify_payment_status(self) -> Reply | None:
+        status = self.facts.get("claim_status")
+        amount = self.facts.get("paid_amount")
+        if status and status.value == "not paid" and amount and amount.value > 0 and not self.payment_status_checked:
+            self.payment_status_checked = True
+            self.phase = "active"
+            return self._ask("claim_status", f"You reported the claim as unpaid and a paid amount of {money(amount.value)}. "
+                                             "Please confirm the current status.")
+        return None
 
     def _read_back(self, closing=False) -> Reply:
         self.readbacks += 1
@@ -274,12 +325,14 @@ class Agent:
             old = self.facts.get(key)
             if old is None or old.value != found.value:
                 changed.add(key)
+                if key == "claim_status":
+                    self.payment_status_checked = False
             self.facts[key] = found
             self.fact_turn[key] = turn
             self.unavailable.discard(key)
         for key in res.unavailable:
             if key not in res.values:
-                if key in self.facts and key != focus:
+                if key in self.facts:
                     del self.facts[key]
                     changed.add(key)
                 self.unavailable.add(key)
@@ -313,6 +366,9 @@ class Agent:
         res, changed = self._ingest(text)
         thanks = "Thank you." if resumed else ""
 
+        if self.phase == "confirming" and changed:
+            return self._on_confirmation(text, low, res, changed)
+
         if SPELL.search(low) or ASK_CLAIM.search(low) or (REPEAT.search(low) and CLAIM_TALK.search(low)) \
                 or (REPEAT.search(low) and sum(t["speaker"] == "agent" for t in self.transcript) == 1):
             says = [spell_say()]
@@ -324,6 +380,8 @@ class Agent:
         if IDENTITY.search(low) and not res.values:
             return self._speak([Say(f"The patient is {CLAIM['patient_name']}, and the date of service is "
                                     f"{CLAIM['date_of_service_spoken']}. {self.last_question}".strip())])
+        if CPT_REQUEST.search(low):
+            return self._speak([Say(f"I don't have a CPT code for this claim. {self.last_question}".strip())])
 
         if self.phase == "confirming":
             return self._on_confirmation(text, low, res, changed)
@@ -337,6 +395,9 @@ class Agent:
         return self._advance(res, thanks)
 
     def _on_confirmation(self, text, low, res, changed) -> Reply:
+        clarification = self._clarify_payment_status()
+        if clarification is not None:
+            return clarification
         if changed:
             return self._read_back()
         if self.readbacks >= MAX_READBACKS:
@@ -345,10 +406,11 @@ class Agent:
             self.fragment = ""
             return self._speak([Say("I want to make sure I get that right. Which detail should I correct, "
                                     "and what is the right value?")])
-        if NO.search(low) and not (YES.search(low) and not re.search(r"\b(?:no|wrong|incorrect|not)\b", low)):
+        answer = confirmation_answer(low)
+        if answer is False:
             self.confirm_failures = 0
             return self._speak([Say("Which detail should I correct?")], expect="text")
-        if YES.search(low) or END_CALL.search(low):
+        if answer is True or END_CALL.search(low):
             return self._goodbye()
         self.confirm_failures += 1
         if self.confirm_failures >= 3:

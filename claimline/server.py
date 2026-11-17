@@ -118,7 +118,8 @@ class Service:
     def state(self, session: Session) -> dict:
         with session.lock:
             data = {"id": session.id, "kind": session.kind, "status": session.status,
-                    "phase": session.agent.phase, "finished": session.finalized,
+                    "phase": session.agent.phase, "finished": session.finalized and session.detail is not None,
+                    "reviewing": session.finalized and session.detail is None,
                     "transcript": list(session.agent.transcript), "captured": session.agent.result(),
                     "error": session.error}
             if session.finalized:
@@ -142,7 +143,12 @@ class Service:
                 session.result, session.scorecard = result, None
                 session.detail = {"method": "no call took place"}
             return
-        scorecard, detail = review_call(transcript, result, self.groq)
+        try:
+            scorecard, detail = review_call(transcript, result, self.groq)
+        except Exception:
+            LOGGER.exception("AI review failed for call %s; using the transcript audit", session.id)
+            scorecard, detail = review_call(transcript, result)
+            detail["ai_error"] = "The AI review failed. The transcript audit was used."
         meta = {"id": session.id, "kind": session.kind, "call_sid": session.call_sid, "status": session.status,
                 "ended_because": reason, "started": session.created, "finished": time.time(),
                 "agent_phase_at_end": session.agent.phase, "review_method": detail.get("method")}

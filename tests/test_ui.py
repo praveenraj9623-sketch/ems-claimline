@@ -102,6 +102,15 @@ class AppSmokeTest(unittest.TestCase):
             runpy.run_path(str(ROOT / "app.py"), run_name="__main__")
         load.assert_called_once_with(ui_port=8502)
 
+    def test_pending_review_is_not_reported_as_an_empty_call(self):
+        session = self.service.create("voice")
+        session.agent.start()
+        session.finalized = True
+        st = make_streamlit("Voice", state=SessionState(view_id=session.id))
+        self.run_app(st)
+        self.assertIn("Reviewing the call", self.page(st))
+        self.assertNotIn("nothing to review", self.page(st))
+
     def test_phone_mode_without_twilio_settings(self):
         st = make_streamlit("Phone call")
         self.assertEqual(self.run_app(st), "ok")

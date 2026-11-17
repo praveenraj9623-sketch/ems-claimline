@@ -434,6 +434,13 @@ def ingest(text: str, focus: str | None = None, fragment: str = "") -> Ingest:
 
     # 3. Status wording.
     statuses = find_status(t)
+    if "paid_amount" in result.values:
+        subject = r"(?:claim|client|status|it)" if focus == "claim_status" else r"(?:claim|client|status)"
+        explicit_status = re.search(r"\b" + subject + r"\b[\s,:-]+"
+                                    r"(?:(?:status|is|was|has|been|now|currently|already|fully|marked|changed|to|as)[\s,:-]+)*"
+                                    r"paid\b", t, re.I)
+        if not explicit_status:
+            statuses = [(value, evidence) for value, evidence in statuses if value != "paid"]
     if statuses:
         picked, amb = _pick(statuses, text)
         if picked:
